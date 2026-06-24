@@ -1,0 +1,20 @@
+node_modules/
+dataset/
+charts/
+*.py
+generate_charts.py
+generate_paper.js
+prepare_my_data.py
+package-lock.json
+.DS_Store
+Thumbs.db
+
+# Sensitive — never commit
+model/credentials.json
+model/token.json
+*.json.bak
+
+# Training data & artifacts — too large for git
+model/dataset_retrain/
+model/Untitled
+.claude/

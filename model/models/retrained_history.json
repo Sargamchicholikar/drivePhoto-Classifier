@@ -1,0 +1,450 @@
+{
+  "classes": [
+    "animals",
+    "group",
+    "human",
+    "junk"
+  ],
+  "history": [
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 1,
+      "train_loss": 1.038616093218796,
+      "train_acc": 0.3417322834645669,
+      "val_loss": 0.4824651459218243,
+      "val_acc": 0.49385749385749383
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 2,
+      "train_loss": 0.5884234629590993,
+      "train_acc": 0.5748031496062992,
+      "val_loss": 0.3833251724372039,
+      "val_acc": 0.601965601965602
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 3,
+      "train_loss": 0.5092197927590117,
+      "train_acc": 0.6230971128608924,
+      "val_loss": 0.3656008767847347,
+      "val_acc": 0.6216216216216216
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 4,
+      "train_loss": 0.5139823625719766,
+      "train_acc": 0.6335958005249344,
+      "val_loss": 0.3527008631891349,
+      "val_acc": 0.6314496314496314
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 5,
+      "train_loss": 0.4582692818848167,
+      "train_acc": 0.6608923884514436,
+      "val_loss": 0.32386075688814353,
+      "val_acc": 0.6683046683046683
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 6,
+      "train_loss": 0.42054495016733806,
+      "train_acc": 0.6824146981627297,
+      "val_loss": 0.32793288676100224,
+      "val_acc": 0.6511056511056511
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 7,
+      "train_loss": 0.42025643299257975,
+      "train_acc": 0.6992125984251969,
+      "val_loss": 0.29057172014027904,
+      "val_acc": 0.6805896805896806
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 8,
+      "train_loss": 0.40586076402288723,
+      "train_acc": 0.7086614173228346,
+      "val_loss": 0.2953059719440685,
+      "val_acc": 0.683046683046683
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 9,
+      "train_loss": 0.45312511382766285,
+      "train_acc": 0.668241469816273,
+      "val_loss": 0.2747518420951665,
+      "val_acc": 0.7051597051597052
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 10,
+      "train_loss": 0.39747526886582063,
+      "train_acc": 0.6923884514435695,
+      "val_loss": 0.27697709810528764,
+      "val_acc": 0.6928746928746928
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 11,
+      "train_loss": 0.4147666361075374,
+      "train_acc": 0.6971128608923884,
+      "val_loss": 0.27648291848508383,
+      "val_acc": 0.7002457002457002
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 12,
+      "train_loss": 0.4033258136958275,
+      "train_acc": 0.7207349081364829,
+      "val_loss": 0.2955602838014795,
+      "val_acc": 0.6683046683046683
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 13,
+      "train_loss": 0.3857433956751986,
+      "train_acc": 0.6971128608923884,
+      "val_loss": 0.2643833300991199,
+      "val_acc": 0.7199017199017199
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 14,
+      "train_loss": 0.3622971564922433,
+      "train_acc": 0.7228346456692913,
+      "val_loss": 0.2817044709912096,
+      "val_acc": 0.6977886977886978
+    },
+    {
+      "phase": "Phase 1: Classifier Head Only",
+      "epoch": 15,
+      "train_loss": 0.3661469652896791,
+      "train_acc": 0.7149606299212599,
+      "val_loss": 0.2655557854609056,
+      "val_acc": 0.7272727272727273
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 1,
+      "train_loss": 0.34777349472984553,
+      "train_acc": 0.7385826771653543,
+      "val_loss": 0.2268640483187223,
+      "val_acc": 0.7641277641277642
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 2,
+      "train_loss": 0.3252619786838221,
+      "train_acc": 0.7637795275590551,
+      "val_loss": 0.21239474386489363,
+      "val_acc": 0.7788697788697788
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 3,
+      "train_loss": 0.2500910011176362,
+      "train_acc": 0.7837270341207349,
+      "val_loss": 0.18173124771153312,
+      "val_acc": 0.828009828009828
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 4,
+      "train_loss": 0.2287520260088087,
+      "train_acc": 0.8120734908136483,
+      "val_loss": 0.17764176585750438,
+      "val_acc": 0.828009828009828
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 5,
+      "train_loss": 0.20852913282361868,
+      "train_acc": 0.836745406824147,
+      "val_loss": 0.15322634786440642,
+      "val_acc": 0.8525798525798526
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 6,
+      "train_loss": 0.19890847383678115,
+      "train_acc": 0.8446194225721785,
+      "val_loss": 0.14944171063437217,
+      "val_acc": 0.8722358722358723
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 7,
+      "train_loss": 0.20979754061993025,
+      "train_acc": 0.8362204724409449,
+      "val_loss": 0.14607339994913238,
+      "val_acc": 0.8746928746928747
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 8,
+      "train_loss": 0.16172169852913834,
+      "train_acc": 0.8556430446194225,
+      "val_loss": 0.14600990796850705,
+      "val_acc": 0.8722358722358723
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 9,
+      "train_loss": 0.17579548727339647,
+      "train_acc": 0.8608923884514436,
+      "val_loss": 0.148778481184704,
+      "val_acc": 0.8525798525798526
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 10,
+      "train_loss": 0.1681260463759655,
+      "train_acc": 0.8656167979002625,
+      "val_loss": 0.14575835293575354,
+      "val_acc": 0.8771498771498771
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 11,
+      "train_loss": 0.16714947863904822,
+      "train_acc": 0.8682414698162729,
+      "val_loss": 0.13872073744526658,
+      "val_acc": 0.8673218673218673
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 12,
+      "train_loss": 0.14543996163866338,
+      "train_acc": 0.8782152230971129,
+      "val_loss": 0.1336512569640134,
+      "val_acc": 0.8796068796068796
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 13,
+      "train_loss": 0.1458870238206518,
+      "train_acc": 0.8918635170603675,
+      "val_loss": 0.1331515880416008,
+      "val_acc": 0.8845208845208845
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 14,
+      "train_loss": 0.13147336393203635,
+      "train_acc": 0.8850393700787401,
+      "val_loss": 0.13332087628964417,
+      "val_acc": 0.8845208845208845
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 15,
+      "train_loss": 0.1383481820424398,
+      "train_acc": 0.8818897637795275,
+      "val_loss": 0.13240956227668088,
+      "val_acc": 0.8845208845208845
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 16,
+      "train_loss": 0.12810267467354852,
+      "train_acc": 0.8944881889763779,
+      "val_loss": 0.1249340840727457,
+      "val_acc": 0.9066339066339066
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 17,
+      "train_loss": 0.12247514897991665,
+      "train_acc": 0.8944881889763779,
+      "val_loss": 0.1270254666960503,
+      "val_acc": 0.8968058968058968
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 18,
+      "train_loss": 0.13129524820706662,
+      "train_acc": 0.8860892388451443,
+      "val_loss": 0.12106988892069027,
+      "val_acc": 0.8992628992628993
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 19,
+      "train_loss": 0.12891858640148884,
+      "train_acc": 0.8934383202099737,
+      "val_loss": 0.12086330683723422,
+      "val_acc": 0.9041769041769042
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 20,
+      "train_loss": 0.1047637049450962,
+      "train_acc": 0.9039370078740158,
+      "val_loss": 0.12165884175669649,
+      "val_acc": 0.9017199017199017
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 21,
+      "train_loss": 0.10547236922219044,
+      "train_acc": 0.910761154855643,
+      "val_loss": 0.12516416228520488,
+      "val_acc": 0.9066339066339066
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 22,
+      "train_loss": 0.10751245672621439,
+      "train_acc": 0.9112860892388451,
+      "val_loss": 0.11987951123304391,
+      "val_acc": 0.9090909090909091
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 23,
+      "train_loss": 0.11054715778766655,
+      "train_acc": 0.9007874015748032,
+      "val_loss": 0.11907741013703826,
+      "val_acc": 0.9066339066339066
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 24,
+      "train_loss": 0.11752284526472956,
+      "train_acc": 0.9065616797900262,
+      "val_loss": 0.1218523049969638,
+      "val_acc": 0.9066339066339066
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 25,
+      "train_loss": 0.12049234244297809,
+      "train_acc": 0.9002624671916011,
+      "val_loss": 0.12140898249073169,
+      "val_acc": 0.9090909090909091
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 26,
+      "train_loss": 0.1117120133532001,
+      "train_acc": 0.899737532808399,
+      "val_loss": 0.11989680097349152,
+      "val_acc": 0.9090909090909091
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 27,
+      "train_loss": 0.09912765816127847,
+      "train_acc": 0.9086614173228347,
+      "val_loss": 0.11917239764398674,
+      "val_acc": 0.9115479115479116
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 28,
+      "train_loss": 0.11611985187205116,
+      "train_acc": 0.9013123359580052,
+      "val_loss": 0.11966956542296843,
+      "val_acc": 0.9041769041769042
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 29,
+      "train_loss": 0.11262290280634962,
+      "train_acc": 0.8976377952755905,
+      "val_loss": 0.11773381069192722,
+      "val_acc": 0.9066339066339066
+    },
+    {
+      "phase": "Phase 2: Fine-tune Top Blocks",
+      "epoch": 30,
+      "train_loss": 0.11899424305875,
+      "train_acc": 0.910761154855643,
+      "val_loss": 0.11618095867024593,
+      "val_acc": 0.9090909090909091
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 1,
+      "train_loss": 0.10281071783363663,
+      "train_acc": 0.9065616797900262,
+      "val_loss": 0.11728942569995102,
+      "val_acc": 0.9066339066339066
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 2,
+      "train_loss": 0.11111732841007353,
+      "train_acc": 0.9044619422572179,
+      "val_loss": 0.1202221631967172,
+      "val_acc": 0.914004914004914
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 3,
+      "train_loss": 0.10445975043329354,
+      "train_acc": 0.9091863517060368,
+      "val_loss": 0.11826258205810987,
+      "val_acc": 0.9115479115479116
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 4,
+      "train_loss": 0.11890793527009606,
+      "train_acc": 0.9002624671916011,
+      "val_loss": 0.11591376133574315,
+      "val_acc": 0.9115479115479116
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 5,
+      "train_loss": 0.10339436166946657,
+      "train_acc": 0.9165354330708662,
+      "val_loss": 0.11579207676927346,
+      "val_acc": 0.9164619164619164
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 6,
+      "train_loss": 0.10754347252916163,
+      "train_acc": 0.9065616797900262,
+      "val_loss": 0.11730774814212644,
+      "val_acc": 0.9164619164619164
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 7,
+      "train_loss": 0.09759033616446447,
+      "train_acc": 0.9212598425196851,
+      "val_loss": 0.11898956240980865,
+      "val_acc": 0.9164619164619164
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 8,
+      "train_loss": 0.09442801529497612,
+      "train_acc": 0.9154855643044619,
+      "val_loss": 0.11737131499467962,
+      "val_acc": 0.914004914004914
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 9,
+      "train_loss": 0.11088997127190037,
+      "train_acc": 0.9170603674540683,
+      "val_loss": 0.11159122301407469,
+      "val_acc": 0.9115479115479116
+    },
+    {
+      "phase": "Phase 3: Full Backbone Polish",
+      "epoch": 10,
+      "train_loss": 0.11518978877799717,
+      "train_acc": 0.9133858267716536,
+      "val_loss": 0.1134408194873784,
+      "val_acc": 0.914004914004914
+    }
+  ]
+}

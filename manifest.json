@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Drive Photo Classifier",
+  "version": "1.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA15NdWTXHYLUH5ttHl1g5L+lJdVCx1ngu/Lb1dVU1W/vU5yM9oVPxsX1Os8CU8vFYyxWqlul9F2iMhK8zO/UEFrZeoHiURIdzGqVp2/Atu6PcClgD25kRNlS7eaw0lZHI+TGoWMV0acqJN2trIyFkMboVhltnc5dHUhJQneNqIsE9+ieTbNOK9/5smi4oL7VguDxN9rPWIninHaJvL1fKtGt55+xed3tBTJUXlSZNYzuZSgwcj6UD4IVWXsoaTBf6S+IfnnodjJrpALJr6qnEFSvjoN4DZHQaO7D5k06B2HBiMnidYmiejdJz8uBi1XbFg3jwng8gmuMJRAL17XU5qQIDAQAB",
+  "description": "Organise Google Drive photos into Animals, Groups, Human and Junk using on-device AI. Your photos are never shared with any server.",
+  "permissions": [
+    "identity",
+    "storage",
+    "offscreen",
+    "alarms",
+    "notifications",
+    "sidePanel"
+  ],
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "host_permissions": [
+    "https://www.googleapis.com/*",
+    "https://accounts.google.com/*"
+  ],
+  "oauth2": {
+    "client_id": "738149231002-ob7ebh8dmpae14l8ljsmkkcl84er0r27.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/drive",
+      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/drive.metadata.readonly"
+    ]
+  },
+  "action": {
+    "default_title": "Drive Photo Classifier"
+  },
+  "side_panel": {
+    "default_path": "popup/popup.html"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*",
+        "offscreen/*",
+        "model_files/*",
+        "src/face-db.js",
+        "lib/ort/*.js",
+        "lib/ort/*.wasm",
+        "lib/ort/*.mjs"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

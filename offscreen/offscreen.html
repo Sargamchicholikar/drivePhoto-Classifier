@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Offscreen Runtime</title>
+  </head>
+  <body>
+    <!--
+      ONNX Runtime Web — runs our custom 5-class photo classifier (99.5% accuracy).
+      'wasm-unsafe-eval' in the CSP covers WebAssembly — no JavaScript eval needed.
+    -->
+    <script src="../lib/ort/ort.wasm.min.js"></script>
+
+    <!--
+      TensorFlow.js and COCO-SSD have been removed.
+      They used new Function() / eval() internally which violates CSP.
+      Face counting now uses the browser's built-in FaceDetector API instead
+      (no external script needed — it is part of Chrome itself).
+    -->
+
+    <script type="module" src="./offscreen.js"></script>
+  </body>
+</html>

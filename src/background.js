@@ -1,0 +1,1230 @@
+import { getAuthToken, getAuthTokenWithForcedConsent, fullSignOut, clearCachedToken } from "./auth.js";
+import {
+  getOrCreateFolder,
+  listImageFilesPage,
+  listImageFilesInFolderPage,
+  listSubfolders,
+  moveFileToFolder,
+} from "./drive.js";
+import { faceDB } from "./face-db.js";
+
+let cachedToken = null;
+let offscreenReady = false;
+let sortShouldStop = false;
+
+// ── 6-month sort reminder ────────────────────────────────────────────────────
+const REMINDER_ALARM = "photo-sort-reminder";
+const SIX_MONTHS_MIN = 6 * 30 * 24 * 60;
+
+async function scheduleNextSortReminder() {
+  await chrome.storage.local.set({ lastSortTimestamp: Date.now() });
+  await chrome.alarms.clear(REMINDER_ALARM);
+  chrome.alarms.create(REMINDER_ALARM, { delayInMinutes: SIX_MONTHS_MIN });
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== REMINDER_ALARM) return;
+  chrome.notifications.create(REMINDER_ALARM, {
+    type:     "basic",
+    iconUrl:  chrome.runtime.getURL("icons/icon48.png"),
+    title:    "Time to sort your photos!",
+    message:  "It has been 6 months since your last sort. Open Photo Classifier to organise your Drive photos.",
+    priority: 1,
+  });
+});
+
+chrome.notifications.onClicked.addListener((id) => {
+  if (id !== REMINDER_ALARM) return;
+  chrome.notifications.clear(id);
+  chrome.action.openPopup().catch(() => {
+    chrome.tabs.create({ url: chrome.runtime.getURL("popup/popup.html") });
+  });
+});
+
+const SORT_SCAN_PAGE_SIZE            = 1000;
+const SORT_CLASSIFICATION_CHUNK_SIZE = 25;
+const CLASSIFICATION_PARALLELISM     = 4;
+const OFFSCREEN_RUNTIME_VERSION      = "onnx-v7";
+const ROOT_FOLDER_NAME               = "Smart Photo Organizer";
+const PROCESSED_IDS_KEY              = "processedFileIdsV3";
+const MAX_PROCESSED_IDS              = 50000;
+const MARGIN_THRESHOLD               = 0.20;
+const CORRECTIONS_KEY                = "photoCorrectionsV1";
+const LAST_SORT_SUMMARY_KEY          = "lastSortSummaryV1";
+
+
+
+async function ensureFreshToken() {
+  if (cachedToken) return;
+  const silent = await getAuthToken(false);
+  if (silent.ok) { cachedToken = silent.token; return; }
+  const auth = await getAuthToken(true);
+  if (!auth.ok) throw new Error(auth.error || "Sign-in required.");
+  cachedToken = auth.token;
+}
+
+function emitProgress(payload) {
+  chrome.runtime.sendMessage({ type: "PROGRESS_UPDATE", ...payload }).catch(() => {});
+}
+
+async function loadProcessedIdSet() {
+  const data = await chrome.storage.local.get(PROCESSED_IDS_KEY);
+  const ids = Array.isArray(data?.[PROCESSED_IDS_KEY]) ? data[PROCESSED_IDS_KEY] : [];
+  return new Set(ids);
+}
+
+async function saveProcessedIdSet(idSet) {
+  const all = Array.from(idSet);
+  const trimmed = all.slice(Math.max(0, all.length - MAX_PROCESSED_IDS));
+  await chrome.storage.local.set({ [PROCESSED_IDS_KEY]: trimmed });
+}
+
+async function loadCorrections() {
+  const data = await chrome.storage.local.get(CORRECTIONS_KEY);
+  return data[CORRECTIONS_KEY] || {};
+}
+
+async function saveCorrection(fileId, label, originalLabel = null) {
+  const data  = await chrome.storage.local.get(CORRECTIONS_KEY);
+  const store = data[CORRECTIONS_KEY] || {};
+  store[fileId] = { label, originalLabel, timestamp: Date.now() };
+  await chrome.storage.local.set({ [CORRECTIONS_KEY]: store });
+}
+
+async function ensureOffscreenDocument(forceRecreate = false) {
+  if (forceRecreate) {
+    try { await chrome.offscreen.closeDocument(); } catch (_) {}
+    offscreenReady = false;
+  }
+  if (offscreenReady) return;
+  const exists = await chrome.offscreen.hasDocument?.();
+  if (exists) { offscreenReady = true; return; }
+  await chrome.offscreen.createDocument({
+    url: `offscreen/offscreen.html?v=${encodeURIComponent(OFFSCREEN_RUNTIME_VERSION)}`,
+    reasons: ["WORKERS"],
+    justification: "Hosts offline ML model runtime for photo classification.",
+  });
+  offscreenReady = true;
+}
+
+async function pingOffscreen() {
+  return chrome.runtime.sendMessage({ type: "OFFSCREEN_PING" });
+}
+
+async function ensureFreshOffscreenRuntime() {
+  await ensureOffscreenDocument();
+  let pingRes = null;
+  try { pingRes = await pingOffscreen(); } catch (_) { pingRes = null; }
+  const isHealthy = Boolean(pingRes?.ok && pingRes.version === OFFSCREEN_RUNTIME_VERSION);
+  if (isHealthy) return;
+  await ensureOffscreenDocument(true);
+  const secondPing = await pingOffscreen();
+  if (!secondPing?.ok) throw new Error("Offscreen runtime is not responding.");
+  if (secondPing.version !== OFFSCREEN_RUNTIME_VERSION) throw new Error("Stale offscreen runtime version.");
+}
+
+async function ensureFolderTree(token) {
+  const root    = await getOrCreateFolder(token, ROOT_FOLDER_NAME);
+  const junk    = await getOrCreateFolder(token, "Junk",         root.id);
+  const animals = await getOrCreateFolder(token, "Animals",      root.id);
+  const human   = await getOrCreateFolder(token, "Human",        root.id);
+  const group   = await getOrCreateFolder(token, "Group Photos", root.id);
+  const videos  = await getOrCreateFolder(token, "Videos",       root.id);
+  const unsure  = await getOrCreateFolder(token, "Unsure",       root.id);
+  return { root, junk, animals, human, group, videos, unsure };
+}
+
+function probMargin(probs) {
+  if (!Array.isArray(probs) || probs.length < 2) return 0;
+  const sorted = [...probs].sort((a, b) => b - a);
+  return sorted[0] - sorted[1];
+}
+
+// ── Per-class adaptive thresholds (Option 1 learning) ────────────────────────
+// All corrections come from the UNSURE folder review — the user manually sorts
+// photos that the model was uncertain about (margin < 0.20).
+//
+// What each correction tells us:
+//   "The model predicted class X but with LOW confidence (< 0.20 margin).
+//    The correct answer WAS class X."
+//   → The model is systematically UNDERCONFIDENT about class X.
+//   → We should LOWER class X's threshold so future predictions of X
+//     with slightly lower confidence go straight to folder X, not Unsure.
+//
+// Formula:
+//   threshold[cls] = BASE(0.20) - (correctedTo[cls] × 0.004)
+//   Minimum threshold: 0.13 (never commit on very low confidence)
+//   Maximum reduction: 0.07 (at ~18 corrections, threshold reaches 0.13)
+//
+// Example:
+//   15 Unsure photos corrected to "Group"
+//   → threshold[group] = 0.20 - (15 × 0.004) = 0.14
+//   → Photos where model says Group with 86%+ confidence (margin ≥ 0.14)
+//     now go straight to Group instead of Unsure
+//   → Fewer Group photos stuck in the Unsure folder
+
+const THRESHOLD_STEP    = 0.004;  // reduction per correction
+const THRESHOLD_MIN     = 0.13;   // never go below this (still requires decent confidence)
+
+async function getAdaptiveThresholds() {
+  const corrections = await loadCorrections();
+
+  // Count how many Unsure photos were corrected TO each class.
+  // c.label = the class the user assigned (correctedLabel from Unsure review)
+  const correctedTo = { animals: 0, group: 0, human: 0, junk: 0 };
+  for (const c of Object.values(corrections)) {
+    if (c.label && correctedTo[c.label] !== undefined) correctedTo[c.label]++;
+  }
+
+  // Lower threshold for frequently-corrected classes
+  const thresholds = {};
+  for (const cls of ["animals", "group", "human", "junk"]) {
+    const reduction = correctedTo[cls] * THRESHOLD_STEP;
+    thresholds[cls] = Math.max(THRESHOLD_MIN, MARGIN_THRESHOLD - reduction);
+  }
+  return thresholds;
+}
+
+function resolveTargetFolder(file, folders, thresholds = null) {
+  if (String(file.mimeType || "").startsWith("video/")) {
+    return { id: folders.videos.id, label: "Smart Photo Organizer/Videos" };
+  }
+  if (!file.corrected) {
+    const margin    = probMargin(file.probs);
+    // Use the per-class adaptive threshold if available, otherwise base threshold
+    const threshold = thresholds?.[file.category] ?? MARGIN_THRESHOLD;
+    if (margin < threshold) {
+      return { id: folders.unsure.id, label: "Smart Photo Organizer/Unsure" };
+    }
+  }
+  if (file.category === "group")   return { id: folders.group.id,   label: "Smart Photo Organizer/Group Photos" };
+  if (file.category === "human")   return { id: folders.human.id,   label: "Smart Photo Organizer/Human"        };
+  if (file.category === "animals") return { id: folders.animals.id, label: "Smart Photo Organizer/Animals"      };
+  if (file.category === "junk")    return { id: folders.junk.id,    label: "Smart Photo Organizer/Junk"         };
+  return { id: folders.unsure.id, label: "Smart Photo Organizer/Unsure" };
+}
+
+async function classifyInChunks(files, token, chunkSize, progress = null) {
+  const classified = [];
+  const total = files.length;
+  for (let i = 0; i < files.length; i += chunkSize) {
+    const chunk = files.slice(i, i + chunkSize);
+    const offscreenRes = await chrome.runtime.sendMessage({
+      type: "OFFSCREEN_CLASSIFY_FILES",
+      files: chunk,
+      token,
+      parallelism: CLASSIFICATION_PARALLELISM,
+    });
+    if (!offscreenRes?.ok) throw new Error(offscreenRes?.error || "Offscreen classification failed.");
+    classified.push(...(offscreenRes.files || []));
+    if (progress) progress({ processed: Math.min(i + chunk.length, total), total });
+  }
+  return classified;
+}
+
+// Open the side panel when the toolbar icon is clicked
+chrome.action.onClicked.addListener((tab) => {
+  chrome.sidePanel.open({ windowId: tab.windowId });
+});
+
+chrome.runtime.onInstalled.addListener(async () => {
+  await ensureOffscreenDocument();
+});
+
+chrome.runtime.onStartup.addListener(async () => {
+  await ensureOffscreenDocument();
+});
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (typeof msg?.type === "string" && msg.type.startsWith("OFFSCREEN_")) {
+    return false;
+  }
+
+  (async () => {
+
+    if (msg.type === "_INTERNAL_TOKEN_REFRESHED") {
+      if (msg.token) cachedToken = msg.token;
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === "GET_AUTH_STATUS") {
+      if (cachedToken) { sendResponse({ ok: true, isSignedIn: true }); return; }
+      const silent = await getAuthToken(false);
+      if (silent.ok) {
+        cachedToken = silent.token;
+        sendResponse({ ok: true, isSignedIn: true });
+      } else {
+        sendResponse({ ok: true, isSignedIn: false });
+      }
+      return;
+    }
+
+    if (msg.type === "AUTH_SIGN_OUT") {
+      cachedToken = null;
+      await fullSignOut();
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === "AUTH_SIGN_IN") {
+      cachedToken = null;
+      await fullSignOut();
+      const auth = await getAuthTokenWithForcedConsent();
+      if (!auth.ok) { sendResponse(auth); return; }
+      cachedToken = auth.token;
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === "GET_AUTH_TOKEN") {
+      if (!cachedToken) {
+        const authSilent = await getAuthToken(false);
+        if (authSilent.ok) cachedToken = authSilent.token;
+      }
+      if (!cachedToken) {
+        const authInteractive = await getAuthToken(true);
+        if (!authInteractive.ok) {
+          sendResponse({ ok: false, error: authInteractive.error || "Not signed in." });
+          return;
+        }
+        cachedToken = authInteractive.token;
+      }
+      sendResponse({ ok: true, token: cachedToken });
+      return;
+    }
+
+    if (msg.type === "DRIVE_CLASSIFY_AND_SORT") {
+      try { await ensureFreshToken(); } catch (e) { sendResponse({ ok: false, error: e.message }); return; }
+
+      try {
+        emitProgress({ operation: "sort", stage: "scan", processed: 0, total: 1, message: "Scanning Drive for photos…" });
+        sortShouldStop = false;
+        await ensureFreshOffscreenRuntime();
+        const folders = await ensureFolderTree(cachedToken);
+        let pageToken = "";
+        let scannedTotal = 0, classifiedTotal = 0, movedCount = 0;
+        let moveFailedCount = 0, skippedAlreadyProcessed = 0, skippedAlreadyInTarget = 0;
+        const categoryCounts = { animals: 0, humanSingle: 0, humanGroup: 0, junk: 0, videos: 0, unsure: 0 };
+        const categorySizes  = { animals: 0, humanSingle: 0, humanGroup: 0, junk: 0, videos: 0, unsure: 0 };
+        const uncertainFiles = [];
+        const processedIdSet = await loadProcessedIdSet();
+        const corrections    = await loadCorrections();
+        // Load adaptive thresholds once — computed from all past user corrections.
+        // Classes that have been corrected more often require higher confidence
+        // before committing, so borderline photos go to Unsure for human review.
+        const adaptiveThresholds = await getAdaptiveThresholds();
+
+        do {
+          const refreshed = await getAuthToken(false);
+          if (refreshed.ok) cachedToken = refreshed.token;
+
+          // Exclude all Smart Photo Organizer sub-folders so already-sorted
+          // photos are never accidentally re-classified during a normal sort.
+          const excludeParentIds = [
+            folders.root.id, folders.human.id, folders.group.id,
+            folders.animals.id, folders.junk.id, folders.unsure.id,
+            folders.videos.id,
+          ];
+          const page = await listImageFilesPage(cachedToken, {
+            pageToken, pageSize: SORT_SCAN_PAGE_SIZE, includeVideos: true,
+            excludeParentIds,
+          });
+          const pageFiles = page.files || [];
+          if (!pageFiles.length) { pageToken = ""; break; }
+
+          scannedTotal += pageFiles.length;
+
+          // Split into new (unprocessed) and already-done files up front.
+          // Already-processed files are skipped entirely — no re-classification needed.
+          const newFiles   = pageFiles.filter(f => !processedIdSet.has(f.id));
+          const skipCount  = pageFiles.length - newFiles.length;
+          skippedAlreadyProcessed += skipCount;
+
+          const videoFiles = newFiles.filter((f) => String(f.mimeType || "").startsWith("video/"));
+          const imageFiles = newFiles.filter((f) => String(f.mimeType || "").startsWith("image/"));
+
+          emitProgress({
+            operation: "sort", stage: "classify",
+            processed: scannedTotal - pageFiles.length, total: scannedTotal,
+            message: `Classifying ${imageFiles.length} new images…`,
+          });
+
+          const moveClassifiedBatch = async (classifiedBatch) => {
+            for (const file of classifiedBatch) {
+              if (sortShouldStop) { await saveProcessedIdSet(processedIdSet); return; }
+              if (processedIdSet.has(file.id)) { skippedAlreadyProcessed += 1; continue; }
+
+              const corr = corrections[file.id];
+              const eff  = corr ? { ...file, category: corr.label, confidence: 1.0, corrected: true } : file;
+              const targetFolder = resolveTargetFolder(eff, folders, adaptiveThresholds);
+              const fileBytes = Number(eff.size || 0);
+
+              if (String(eff.mimeType || "").startsWith("video/"))       { categoryCounts.videos      += 1; categorySizes.videos      += fileBytes; }
+              else if (targetFolder.label.endsWith("/Unsure"))            { categoryCounts.unsure      += 1; categorySizes.unsure      += fileBytes; }
+              else if (eff.category === "animals")                        { categoryCounts.animals     += 1; categorySizes.animals     += fileBytes; }
+              else if (eff.category === "group")                          { categoryCounts.humanGroup  += 1; categorySizes.humanGroup  += fileBytes; }
+              else if (eff.category === "human")                          { categoryCounts.humanSingle += 1; categorySizes.humanSingle += fileBytes; }
+              else                                                        { categoryCounts.junk        += 1; categorySizes.junk        += fileBytes; }
+
+              if (targetFolder.label.endsWith("/Unsure") && !eff.corrected && !String(eff.mimeType || "").startsWith("video/")) {
+                uncertainFiles.push({ id: file.id, name: file.name, category: eff.category || "unknown", confidence: Math.round((eff.confidence || 0) * 100) });
+              }
+
+              try {
+                const moveRes = await moveFileToFolder(cachedToken, file.id, targetFolder.id);
+                if (moveRes?.skipped) skippedAlreadyInTarget += 1;
+                else movedCount += 1;
+                processedIdSet.add(file.id);
+              } catch (_) { moveFailedCount += 1; }
+
+              emitProgress({
+                operation: "sort", stage: "move",
+                processed: movedCount + moveFailedCount + skippedAlreadyInTarget + skippedAlreadyProcessed,
+                total: Math.max(1, classifiedTotal),
+                message: `Moving ${movedCount + moveFailedCount}/${classifiedTotal} (skipped ${skippedAlreadyInTarget + skippedAlreadyProcessed})`,
+                categoryCounts: { ...categoryCounts },
+                categorySizes:  { ...categorySizes },
+              });
+            }
+          };
+
+          const imageChunks = [];
+          for (let i = 0; i < imageFiles.length; i += SORT_CLASSIFICATION_CHUNK_SIZE) {
+            imageChunks.push(imageFiles.slice(i, i + SORT_CLASSIFICATION_CHUNK_SIZE));
+          }
+
+          const classifiedVideos = videoFiles.map((f) => ({ ...f, category: "video", confidence: 1, label: "video_detected" }));
+          classifiedTotal += classifiedVideos.length;
+
+          let pendingMovePromise = classifiedVideos.length ? moveClassifiedBatch(classifiedVideos) : null;
+          let nextClassifyPromise = null;
+          let imageProcessedWithinPage = 0;
+
+          if (imageChunks.length) {
+            nextClassifyPromise = classifyInChunks(imageChunks[0], cachedToken, SORT_CLASSIFICATION_CHUNK_SIZE, ({ processed, total }) => {
+              emitProgress({ operation: "sort", stage: "classify", processed: classifiedTotal + imageProcessedWithinPage + processed, total: Math.max(classifiedTotal + imageProcessedWithinPage + total, scannedTotal), message: `Classifying images ${classifiedTotal + imageProcessedWithinPage + processed}` });
+            });
+          }
+
+          for (let chunkIndex = 0; chunkIndex < imageChunks.length; chunkIndex++) {
+            const classifiedChunk = await nextClassifyPromise;
+            imageProcessedWithinPage += classifiedChunk.length;
+            classifiedTotal += classifiedChunk.length;
+            const hasNext = chunkIndex + 1 < imageChunks.length;
+            if (hasNext) {
+              nextClassifyPromise = classifyInChunks(imageChunks[chunkIndex + 1], cachedToken, SORT_CLASSIFICATION_CHUNK_SIZE, ({ processed, total }) => {
+                emitProgress({ operation: "sort", stage: "classify", processed: classifiedTotal + processed, total: Math.max(classifiedTotal + total, scannedTotal), message: `Classifying images ${classifiedTotal + processed}` });
+              });
+            }
+            const movePromise = moveClassifiedBatch(classifiedChunk);
+            if (pendingMovePromise) await pendingMovePromise;
+            pendingMovePromise = movePromise;
+          }
+
+          if (pendingMovePromise) await pendingMovePromise;
+          pageToken = sortShouldStop ? "" : (page.nextPageToken || "");
+        } while (pageToken);
+
+        emitProgress({ operation: "sort", stage: "done", processed: 1, total: 1, message: sortShouldStop ? "Sort stopped — progress saved." : "Sorting complete." });
+        await saveProcessedIdSet(processedIdSet);
+        await scheduleNextSortReminder();
+
+        const folderTree = {
+          root:    { id: folders.root.id,    label: "Smart Photo Organizer" },
+          junk:    { id: folders.junk.id,    label: "Smart Photo Organizer/Junk" },
+          animals: { id: folders.animals.id, label: "Smart Photo Organizer/Animals" },
+          human:   { id: folders.human.id,   label: "Smart Photo Organizer/Human" },
+          group:   { id: folders.group.id,   label: "Smart Photo Organizer/Group Photos" },
+          videos:  { id: folders.videos.id,  label: "Smart Photo Organizer/Videos" },
+          unsure:  { id: folders.unsure.id,  label: "Smart Photo Organizer/Unsure" },
+        };
+
+        // Persist summary so the popup can restore it on any future re-open
+        const sortSummary = {
+          categoryCounts, categorySizes,
+          movedCount, scannedTotal, moveFailedCount,
+          skippedAlreadyProcessed, skippedAlreadyInTarget,
+          wasStopped: sortShouldStop,
+          timestamp: Date.now(),
+          folders: folderTree,
+        };
+        await chrome.storage.local.set({ [LAST_SORT_SUMMARY_KEY]: sortSummary });
+
+        // Note: the full Unsure folder listing is done by GET_UNSURE_FILES
+        // (called by autoLaunchUnsureReview in the popup) — no cap, all pages.
+        sendResponse({
+          ok: true,
+          uncertainFiles,
+          summary: { scannedTotal, classifiedTotal, movedCount, moveFailedCount, skippedAlreadyProcessed, skippedAlreadyInTarget, categoryCounts, categorySizes, wasStopped: sortShouldStop },
+          folders: folderTree,
+        });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    if (msg.type === "CLEAR_PROCESSED_IDS") {
+      await chrome.storage.local.remove([PROCESSED_IDS_KEY]);
+      sendResponse({ ok: true });
+      return;
+    }
+
+    // ── Re-sort: re-classify photos already inside Smart Photo Organizer ───────
+    // Only scans Human / Group / Animals / Junk / Unsure sub-folders.
+    // Videos are never re-classified (they stay in Videos/).
+    // This does NOT touch photos outside Smart Photo Organizer.
+    if (msg.type === "RESORT_SMART_ORGANIZER") {
+      try {
+        await ensureFreshToken();
+        sortShouldStop = false;
+        emitProgress({ operation: "sort", stage: "scan", processed: 0, total: 1, message: "Scanning Smart Photo Organizer…" });
+
+        await ensureFreshOffscreenRuntime();
+        const folders = await ensureFolderTree(cachedToken);
+        const corrections    = await loadCorrections();
+        const adaptiveThresholds = await getAdaptiveThresholds();
+
+        // Collect all images from the five re-sortable sub-folders + every
+        // person subfolder under People/ (People/Sargam/, People/Mom/, etc.)
+        const peopleRoot     = await getOrCreateFolder(cachedToken, "People", folders.root.id);
+        const personFolders  = await listSubfolders(cachedToken, peopleRoot.id);
+
+        const RESORT_FOLDERS = [
+          folders.human, folders.group, folders.animals,
+          folders.junk,  folders.unsure,
+          ...personFolders,
+        ];
+
+        let allFiles = [];
+        for (const folder of RESORT_FOLDERS) {
+          let pt = "";
+          do {
+            const refreshed = await getAuthToken(false);
+            if (refreshed.ok) cachedToken = refreshed.token;
+            const page = await listImageFilesInFolderPage(cachedToken, folder.id, {
+              pageToken: pt, pageSize: SORT_SCAN_PAGE_SIZE, includeVideos: false,
+            });
+            allFiles = allFiles.concat(page.files || []);
+            pt = page.nextPageToken || "";
+          } while (pt && !sortShouldStop);
+        }
+
+        // Use CDN thumbnails for classification — same ~40x speedup as face detection
+        allFiles = allFiles.map(f => ({
+          ...f,
+          downloadUrl: f.thumbnailLink
+            ? f.thumbnailLink.replace(/=s\d+$/, "=w800").replace(/=w\d+$/, "=w800")
+            : undefined,
+        }));
+
+        emitProgress({ operation: "sort", stage: "classify", processed: 0, total: allFiles.length, message: `Re-classifying ${allFiles.length} photos…` });
+
+        let movedCount = 0, moveFailedCount = 0, skippedAlreadyInTarget = 0;
+        const categoryCounts = { animals: 0, humanSingle: 0, humanGroup: 0, junk: 0, videos: 0, unsure: 0 };
+        const categorySizes  = { animals: 0, humanSingle: 0, humanGroup: 0, junk: 0, videos: 0, unsure: 0 };
+        const uncertainFiles = [];
+        const processedIdSet = await loadProcessedIdSet();
+
+        // Classify in chunks and move each chunk immediately (interleaved pipeline)
+        for (let i = 0; i < allFiles.length; i += SORT_CLASSIFICATION_CHUNK_SIZE) {
+          if (sortShouldStop) break;
+          const chunk = allFiles.slice(i, i + SORT_CLASSIFICATION_CHUNK_SIZE);
+
+          const refreshed = await getAuthToken(false);
+          if (refreshed.ok) cachedToken = refreshed.token;
+
+          const classified = await classifyInChunks(chunk, cachedToken, SORT_CLASSIFICATION_CHUNK_SIZE);
+
+          for (const file of classified) {
+            if (sortShouldStop) break;
+            const corr = corrections[file.id];
+            const eff  = corr ? { ...file, category: corr.label, confidence: 1.0, corrected: true } : file;
+            const targetFolder = resolveTargetFolder(eff, folders, adaptiveThresholds);
+            const fileBytes = Number(eff.size || 0);
+
+            if (targetFolder.label.endsWith("/Unsure"))      { categoryCounts.unsure      += 1; categorySizes.unsure      += fileBytes; }
+            else if (eff.category === "animals")             { categoryCounts.animals     += 1; categorySizes.animals     += fileBytes; }
+            else if (eff.category === "group")               { categoryCounts.humanGroup  += 1; categorySizes.humanGroup  += fileBytes; }
+            else if (eff.category === "human")               { categoryCounts.humanSingle += 1; categorySizes.humanSingle += fileBytes; }
+            else                                             { categoryCounts.junk        += 1; categorySizes.junk        += fileBytes; }
+
+            if (targetFolder.label.endsWith("/Unsure") && !eff.corrected) {
+              uncertainFiles.push({ id: file.id, name: file.name, category: eff.category || "unknown", confidence: Math.round((eff.confidence || 0) * 100) });
+            }
+
+            try {
+              const moveRes = await moveFileToFolder(cachedToken, file.id, targetFolder.id);
+              if (moveRes?.skipped) skippedAlreadyInTarget += 1;
+              else { movedCount += 1; processedIdSet.add(file.id); }
+            } catch (_) { moveFailedCount += 1; }
+
+            emitProgress({
+              operation: "sort", stage: "move",
+              processed: movedCount + moveFailedCount + skippedAlreadyInTarget,
+              total: allFiles.length,
+              message: `Re-sorting: ${movedCount + moveFailedCount}/${allFiles.length}`,
+              categoryCounts: { ...categoryCounts },
+              categorySizes:  { ...categorySizes },
+            });
+          }
+        }
+
+        await saveProcessedIdSet(processedIdSet);
+        emitProgress({ operation: "sort", stage: "done", processed: 1, total: 1, message: sortShouldStop ? "Re-sort stopped." : "Re-sort complete." });
+
+        const folderTree = {
+          root:    { id: folders.root.id,    label: "Smart Photo Organizer" },
+          junk:    { id: folders.junk.id,    label: "Smart Photo Organizer/Junk" },
+          animals: { id: folders.animals.id, label: "Smart Photo Organizer/Animals" },
+          human:   { id: folders.human.id,   label: "Smart Photo Organizer/Human" },
+          group:   { id: folders.group.id,   label: "Smart Photo Organizer/Group Photos" },
+          videos:  { id: folders.videos.id,  label: "Smart Photo Organizer/Videos" },
+          unsure:  { id: folders.unsure.id,  label: "Smart Photo Organizer/Unsure" },
+        };
+
+        const sortSummary = {
+          categoryCounts, categorySizes,
+          movedCount, scannedTotal: allFiles.length, moveFailedCount,
+          skippedAlreadyProcessed: 0, skippedAlreadyInTarget,
+          wasStopped: sortShouldStop,
+          timestamp: Date.now(),
+          folders: folderTree,
+        };
+        await chrome.storage.local.set({ [LAST_SORT_SUMMARY_KEY]: sortSummary });
+
+        sendResponse({
+          ok: true,
+          uncertainFiles,
+          summary: { scannedTotal: allFiles.length, movedCount, moveFailedCount, skippedAlreadyInTarget, categoryCounts, categorySizes, wasStopped: sortShouldStop },
+          folders: folderTree,
+        });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    if (msg.type === "APPLY_CORRECTION") {
+      const { fileId, correctedLabel, originalLabel } = msg;
+      if (!fileId || !correctedLabel) { sendResponse({ ok: false, error: "fileId and correctedLabel are required." }); return; }
+      try {
+        await ensureFreshToken();
+        await saveCorrection(fileId, correctedLabel, originalLabel);
+
+        const folders  = await ensureFolderTree(cachedToken);
+        const labelMap = { human: folders.human, group: folders.group, animals: folders.animals, junk: folders.junk };
+        const targetFolder = labelMap[correctedLabel] ?? folders.unsure;
+        await moveFileToFolder(cachedToken, fileId, targetFolder.id);
+
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    if (msg.type === "EXPORT_CORRECTIONS") {
+      const corrections = await loadCorrections();
+      sendResponse({ ok: true, corrections });
+      return;
+    }
+
+    if (msg.type === "GET_MODEL_INFO") {
+      const corrections = await loadCorrections();
+      const { lastSortTimestamp } = await chrome.storage.local.get("lastSortTimestamp");
+      const stored = await chrome.storage.local.get(LAST_SORT_SUMMARY_KEY);
+      const lastSortSummary = stored[LAST_SORT_SUMMARY_KEY] || null;
+      sendResponse({
+        ok: true,
+        runtimeVersion: OFFSCREEN_RUNTIME_VERSION,
+        correctionsCount: Object.keys(corrections).length,
+        lastSortTimestamp: lastSortTimestamp || null,
+        lastSortSummary,
+      });
+      return;
+    }
+
+
+    if (msg.type === "RELOAD_OFFSCREEN") {
+      await ensureOffscreenDocument(true);
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === "STOP_SORT") {
+      sortShouldStop = true;
+      sendResponse({ ok: true });
+      return;
+    }
+
+    // ── Fetch all images from the Unsure folder for post-sort review ───────────
+    if (msg.type === "GET_UNSURE_FILES") {
+      try {
+        await ensureFreshToken();
+        const folders = await ensureFolderTree(cachedToken);
+        const unsureFolderId = folders.unsure.id;
+
+        // Fetch ALL files from the Unsure folder across as many pages as needed.
+        // Each page returns up to 100 file metadata records (no image data),
+        // so even 2,000 unsure files only costs ~20 lightweight API calls.
+        const allFiles = [];
+        let pt = "";
+        do {
+          const page = await listImageFilesInFolderPage(
+            cachedToken, unsureFolderId,
+            { pageToken: pt, pageSize: 100, includeVideos: false }
+          );
+          allFiles.push(...(page.files || []));
+          pt = page.nextPageToken || "";
+
+          // Emit progress so the popup can show "Loading X unsure photos…"
+          // while pagination is still running for large folders.
+          try {
+            chrome.runtime.sendMessage({
+              type: "UNSURE_LOAD_PROGRESS",
+              loaded: allFiles.length,
+              done: !pt,
+            }).catch(() => {});
+          } catch (_) {}
+
+        } while (pt);   // ← no cap — fetch every page until Drive says there are no more
+
+        // Build a larger thumbnail URL from Google's CDN link
+        const files = allFiles.map(f => ({
+          id:           f.id,
+          name:         f.name,
+          // Replace the size suffix (=s72 or similar) with =s400 for a clear preview
+          thumbnailUrl: f.thumbnailLink
+            ? f.thumbnailLink.replace(/=s\d+$/, "=s400")
+            : null,
+        }));
+
+        sendResponse({ ok: true, files, total: allFiles.length, folderId: unsureFolderId });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+      return;
+    }
+
+    // ── Face scan: detect faces in Human + Group folders ───────────────────────
+    if (msg.type === "SCAN_FACES") {
+      try {
+        await ensureFreshToken();
+        await ensureFreshOffscreenRuntime();
+
+        const folders = await ensureFolderTree(cachedToken);
+
+        // Track which folder each photo came from so we can store it in faceDB
+        const foldersToScan = [
+          { id: folders.human.id, name: "Human" },
+          { id: folders.group.id, name: "Group" },
+        ];
+        const allPhotos = []; // each entry: { ...fileFields, sourceFolderId, sourceFolderName }
+
+        for (const folder of foldersToScan) {
+          let pt = "";
+          do {
+            const page = await listImageFilesInFolderPage(cachedToken, folder.id, {
+              pageToken: pt, pageSize: 100, includeVideos: false,
+            });
+            for (const f of (page.files || [])) {
+              allPhotos.push({ ...f, sourceFolderId: folder.id, sourceFolderName: folder.name });
+            }
+            pt = page.nextPageToken || "";
+          } while (pt);
+        }
+
+        emitProgress({ operation: "faces", stage: "scan", processed: 0, total: allPhotos.length, message: `Found ${allPhotos.length} photos to scan for faces…` });
+
+        let processed = 0;
+        for (const photo of allPhotos) {
+          if (sortShouldStop) break;
+
+          const alreadyDone = await faceDB.getPhotoFaces(photo.id);
+          if (alreadyDone) { processed++; continue; }
+
+          emitProgress({ operation: "faces", stage: "scan", processed, total: allPhotos.length, message: `Scanning faces: ${processed}/${allPhotos.length}` });
+
+          try {
+            const refreshed = await getAuthToken(false);
+            if (refreshed.ok) cachedToken = refreshed.token;
+
+            const isLastPhoto = (processed === allPhotos.length);
+            const offRes = await chrome.runtime.sendMessage({
+              type: "OFFSCREEN_DETECT_FACES",
+              file: photo,
+              token: cachedToken,
+              releaseSessions: isLastPhoto, // free 37MB recognizer after last photo
+            });
+
+            const faces = offRes?.ok ? (offRes.faces || []) : [];
+            const faceIds = [];
+
+            for (let fi = 0; fi < faces.length; fi++) {
+              const face   = faces[fi];
+              const faceId = `face_${photo.id}_${fi}`;
+
+              const allPersons = await faceDB.getAllPersons();
+              let bestPerson = null, bestSim = -1;
+
+              for (const person of allPersons) {
+                const sim = cosineSim(face.embedding, person.centroid);
+                if (sim > bestSim) { bestSim = sim; bestPerson = person; }
+              }
+
+              const CLUSTER_THRESHOLD = 0.50; // balanced: fewer missed groupings vs. false merges
+              let personId;
+
+              if (bestSim >= CLUSTER_THRESHOLD && bestPerson) {
+                // Merge into existing person cluster — update centroid as running mean
+                const n = bestPerson.photoCount;
+                const newCentroid = centroidUpdate(bestPerson.centroid, face.embedding, n);
+                personId = bestPerson.id;
+                await faceDB.savePerson({
+                  ...bestPerson,
+                  centroid:       newCentroid,
+                  photoCount:     n + 1,
+                  thumbnailDataUrl: bestPerson.thumbnailDataUrl || face.thumbnailDataUrl,
+                });
+              } else {
+                // New unknown person
+                personId = `person_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                await faceDB.savePerson({
+                  id:              personId,
+                  name:            null,
+                  centroid:        face.embedding,
+                  photoCount:      1,
+                  thumbnailDataUrl: face.thumbnailDataUrl,
+                  createdAt:       Date.now(),
+                });
+              }
+
+              await faceDB.saveEmbedding({
+                id:               faceId,
+                photoId:          photo.id,
+                photoName:        photo.name,
+                photoDate:        photo.modifiedTime || null,
+                sourceFolderId:   photo.sourceFolderId   || null,
+                sourceFolderName: photo.sourceFolderName || null,
+                embedding:        face.embedding,
+                box:              face.box,
+                score:            face.score,
+                personId,
+                thumbnailDataUrl: face.thumbnailDataUrl,
+              });
+
+              faceIds.push(faceId);
+            }
+
+            await faceDB.savePhotoFaces({ photoId: photo.id, faceIds, processedAt: Date.now() });
+          } catch (err) {
+            console.warn("[SCAN_FACES] Error on photo", photo.name, err.message);
+            await faceDB.savePhotoFaces({ photoId: photo.id, faceIds: [], processedAt: Date.now(), error: err.message });
+          }
+
+          processed++;
+        }
+
+        emitProgress({ operation: "faces", stage: "done", processed: allPhotos.length, total: allPhotos.length, message: "Face scan complete." });
+
+        const persons = await faceDB.getAllPersons();
+        sendResponse({
+          ok: true,
+          persons: persons.map(p => ({ id: p.id, name: p.name, photoCount: p.photoCount, thumbnailDataUrl: p.thumbnailDataUrl })),
+          totalScanned: allPhotos.length,
+        });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Build People Albums in Drive (+ smart event albums) ────────────────────
+    if (msg.type === "BUILD_PEOPLE_ALBUMS") {
+      try {
+        await ensureFreshToken();
+        const persons    = await faceDB.getAllPersons();
+        // Only build albums for starred persons (important people selected by user)
+        // Fall back to all named persons if no one is starred yet
+        const starred    = persons.filter(p => p.starred && p.name);
+        const named      = starred.length
+          ? starred
+          : persons.filter(p => p.name && p.photoCount >= 1);
+        if (!named.length) { sendResponse({ ok: true, results: [], message: "Star at least one person or name them first." }); return; }
+
+        const root       = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
+        const peopleRoot = await getOrCreateFolder(cachedToken, "People", root.id);
+        const results    = [];
+
+        for (const person of named) {
+          const personFolder = await getOrCreateFolder(cachedToken, person.name, peopleRoot.id);
+          const embeddings   = await faceDB.getEmbeddingsByPerson(person.id);
+          const photoIds     = [...new Set(embeddings.map(e => e.photoId))];
+
+          // ── Smart event detection: group this person's photos by month ────────
+          // Photos within the same calendar month form an event.
+          // Events with ≥ 3 photos get their own sub-album: "PersonName – Mon YYYY"
+          const monthBuckets = {};
+          for (const emb of embeddings) {
+            if (!emb.photoDate) continue;
+            const d    = new Date(emb.photoDate);
+            const key  = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+            const label = d.toLocaleString("en", { month: "short", year: "numeric" });
+            (monthBuckets[key] = monthBuckets[key] || { label, photoIds: new Set() }).photoIds.add(emb.photoId);
+          }
+
+          // Build a map of photoId → sourceFolderId so we know exactly
+          // which parent folder to detach each photo from during the move
+          const photoSourceMap = {};
+          for (const emb of embeddings) {
+            if (emb.photoId && emb.sourceFolderId) {
+              photoSourceMap[emb.photoId] = emb.sourceFolderId;
+            }
+          }
+
+          let moved = 0;
+          for (const photoId of photoIds) {
+            try {
+              await moveFileToFolder(cachedToken, photoId, personFolder.id);
+              moved++;
+            } catch (_) {}
+          }
+
+          // Create event sub-albums for months with ≥ 3 photos
+          const events = [];
+          for (const [, bucket] of Object.entries(monthBuckets)) {
+            if (bucket.photoIds.size < 3) continue;
+            const evtName   = `${person.name} – ${bucket.label}`;
+            const evtFolder = await getOrCreateFolder(cachedToken, evtName, peopleRoot.id);
+            let evtMoved = 0;
+            for (const pid of bucket.photoIds) {
+              try { await moveFileToFolder(cachedToken, pid, evtFolder.id); evtMoved++; } catch (_) {}
+            }
+            events.push({ name: evtName, photosMoved: evtMoved, folderId: evtFolder.id });
+          }
+
+          results.push({ personId: person.id, name: person.name, photosMoved: moved, folderId: personFolder.id, events });
+        }
+
+        sendResponse({ ok: true, results });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Get all people (for popup rendering) ───────────────────────────────────
+    if (msg.type === "GET_PEOPLE") {
+      try {
+        const persons    = await faceDB.getAllPersons();
+        const embeddings = await faceDB.getAllEmbeddings();
+
+        // Aggregate which source folders each person's photos came from
+        const personFolderNames = {};
+        for (const emb of embeddings) {
+          if (!emb.sourceFolderName || !emb.personId) continue;
+          if (!personFolderNames[emb.personId]) personFolderNames[emb.personId] = new Set();
+          personFolderNames[emb.personId].add(emb.sourceFolderName);
+        }
+
+        sendResponse({
+          ok: true,
+          persons: persons
+            .sort((a, b) => b.photoCount - a.photoCount) // most-seen first
+            .map(p => ({
+              id:               p.id,
+              name:             p.name,
+              photoCount:       p.photoCount,
+              starred:          p.starred || false,
+              thumbnailDataUrl: p.thumbnailDataUrl,
+              // e.g. ["Human", "Group"] — which folders this person appears in
+              sourceFolders:    Array.from(personFolderNames[p.id] || []),
+            })),
+        });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Rename a person cluster ────────────────────────────────────────────────
+    if (msg.type === "RENAME_PERSON") {
+      const { personId, name } = msg;
+      if (!personId) { sendResponse({ ok: false, error: "personId required." }); return; }
+      try {
+        const person = await faceDB.getPerson(personId);
+        if (!person) { sendResponse({ ok: false, error: "Person not found." }); return; }
+        await faceDB.savePerson({ ...person, name: name || null });
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Star / unstar a person (mark as important) ────────────────────────────
+    if (msg.type === "TOGGLE_STAR") {
+      const { personId, starred } = msg;
+      if (!personId) { sendResponse({ ok: false, error: "personId required." }); return; }
+      try {
+        await faceDB.starPerson(personId, starred);
+        sendResponse({ ok: true, starred });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Extract face embedding from uploaded reference photo ───────────────────
+    if (msg.type === "EXTRACT_FACE_EMBEDDING") {
+      const { imageDataUrl } = msg;
+      if (!imageDataUrl) { sendResponse({ ok: false, error: "No image data." }); return; }
+      try {
+        await ensureFreshOffscreenRuntime();
+        const res = await chrome.runtime.sendMessage({
+          type: "OFFSCREEN_EXTRACT_EMBEDDING",
+          imageDataUrl,
+        });
+        sendResponse(res);
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── List recent Drive images for the reference photo picker ───────────────
+    if (msg.type === "LIST_DRIVE_IMAGES_FOR_PICKER") {
+      try {
+        await ensureFreshToken();
+        const url = new URL("https://www.googleapis.com/drive/v3/files");
+        url.searchParams.set("q", "mimeType contains 'image/' and trashed=false");
+        url.searchParams.set("orderBy", "modifiedTime desc");
+        url.searchParams.set("pageSize", "40");
+        url.searchParams.set("fields", "files(id,name,thumbnailLink,mimeType,modifiedTime)");
+        const resp = await fetch(url.toString(), {
+          headers: { Authorization: `Bearer ${cachedToken}` },
+        });
+        if (!resp.ok) throw new Error(`Drive API ${resp.status}`);
+        const data = await resp.json();
+        sendResponse({ ok: true, files: data.files || [] });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Download a Drive image and return it as a base64 dataURL ──────────────
+    if (msg.type === "DOWNLOAD_DRIVE_IMAGE_BASE64") {
+      try {
+        await ensureFreshToken();
+        const { fileId, mimeType } = msg;
+        const resp = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+          { headers: { Authorization: `Bearer ${cachedToken}` } },
+        );
+        if (!resp.ok) throw new Error(`Drive download ${resp.status}`);
+        const arrayBuffer = await resp.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        // Convert to base64 in chunks (safe for large files in service worker)
+        const chunkSize = 8192;
+        let binary = "";
+        for (let i = 0; i < uint8.length; i += chunkSize) {
+          binary += String.fromCharCode(...uint8.subarray(i, i + chunkSize));
+        }
+        const base64  = btoa(binary);
+        const dataUrl = `data:${mimeType || "image/jpeg"};base64,${base64}`;
+        sendResponse({ ok: true, dataUrl });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Find & move person photos ──────────────────────────────────────────────
+    // Upload a reference photo → extract embedding → scan Human, Junk, Unsure
+    // (NOT Group — group photos contain multiple people) → move matches to
+    // Smart Photo Organizer/People/[name]/
+    if (msg.type === "FIND_AND_MOVE_PERSON_PHOTOS") {
+      // threshold 0.72: strict enough to filter out family-member false matches
+      const { referenceEmbedding, personName, threshold = 0.72 } = msg;
+      if (!referenceEmbedding || !personName) {
+        sendResponse({ ok: false, error: "Reference photo and name are required." });
+        return;
+      }
+
+      try {
+        await ensureFreshToken();
+        await ensureFreshOffscreenRuntime();
+
+        const folders = await ensureFolderTree(cachedToken);
+
+        // Scan Human, Junk, Unsure — skip Group (group photos have multiple people).
+        // All matches are moved to the person folder regardless of source.
+        const foldersToScan = [
+          { id: folders.human.id,  name: "Human"  },
+          { id: folders.junk.id,   name: "Junk"   },
+          { id: folders.unsure.id, name: "Unsure" },
+        ];
+
+        // Collect all photos from those three folders
+        const allPhotos = [];
+        for (const folder of foldersToScan) {
+          let pt = "";
+          do {
+            const refreshed = await getAuthToken(false);
+            if (refreshed.ok) cachedToken = refreshed.token;
+            const page = await listImageFilesInFolderPage(cachedToken, folder.id, {
+              pageToken: pt, pageSize: 100, includeVideos: false,
+            });
+            for (const f of (page.files || [])) {
+              allPhotos.push({ ...f, sourceFolderId: folder.id, sourceFolderName: folder.name });
+            }
+            pt = page.nextPageToken || "";
+          } while (pt);
+        }
+
+        emitProgress({
+          operation: "findPerson", stage: "scan",
+          processed: 0, total: allPhotos.length,
+          message: `Scanning ${allPhotos.length} photos for ${personName}…`,
+        });
+
+        // Create destination folder: Smart Photo Organizer/People/[name]/
+        const root       = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
+        const peopleRoot = await getOrCreateFolder(cachedToken, "People", root.id);
+        const personFolder = await getOrCreateFolder(cachedToken, personName, peopleRoot.id);
+
+        let matched = 0, movedCount = 0, scanned = 0;
+
+        // Pipeline: every DETECT_BATCH photos detected, kick off their moves in the
+        // background (Promise.all, up to MOVE_CONCURRENCY parallel Drive calls) without
+        // blocking the detection loop. Detection and moves run simultaneously.
+        const DETECT_BATCH   = 10;
+        const MOVE_CONCURRENCY = 5;
+        const pendingMoves   = [];   // background move Promises — awaited at end
+        let   batchMatchIds  = [];   // matches collected in current detection batch
+
+        function flushBatch() {
+          if (!batchMatchIds.length) return;
+          const ids = batchMatchIds.splice(0);   // drain current batch
+          const p = (async () => {
+            for (let j = 0; j < ids.length; j += MOVE_CONCURRENCY) {
+              const chunk = ids.slice(j, j + MOVE_CONCURRENCY);
+              await Promise.all(chunk.map(id =>
+                moveFileToFolder(cachedToken, id, personFolder.id)
+                  .then(() => { movedCount++; })
+                  .catch(err => console.warn("[FIND_PERSON] Move failed:", err.message))
+              ));
+            }
+          })();
+          pendingMoves.push(p);
+        }
+
+        for (let idx = 0; idx < allPhotos.length; idx++) {
+          if (sortShouldStop) break;
+          const photo = allPhotos[idx];
+          scanned++;
+
+          emitProgress({
+            operation: "findPerson", stage: "scan",
+            processed: scanned, total: allPhotos.length,
+            message: `Scanning ${scanned}/${allPhotos.length} — ${matched} matched, ${movedCount} moved…`,
+            personName,
+          });
+
+          try {
+            const refreshed = await getAuthToken(false);
+            if (refreshed.ok) cachedToken = refreshed.token;
+
+            const thumbnailUrl = photo.thumbnailLink
+              ? photo.thumbnailLink.replace(/=s\d+$/, "=w800").replace(/=w\d+$/, "=w800")
+              : null;
+
+            const isLast = scanned === allPhotos.length;
+            const offRes = await chrome.runtime.sendMessage({
+              type: "OFFSCREEN_DETECT_FACES",
+              file: photo, token: cachedToken,
+              thumbnailUrl, releaseSessions: isLast,
+            });
+
+            if (!offRes?.ok || !offRes.faces?.length) continue;
+
+            // Single-face filter: skip group/family photos
+            if (offRes.faces.length > 1) continue;
+
+            // Strict threshold to filter out similar-looking family members
+            const sim = cosineSim(offRes.faces[0].embedding, referenceEmbedding);
+            if (sim >= threshold) {
+              matched++;
+              batchMatchIds.push(photo.id);
+            }
+          } catch (err) {
+            console.warn("[FIND_PERSON] Error on photo", photo.name, err.message);
+          }
+
+          // Every DETECT_BATCH photos, kick off moves in background without blocking
+          if ((idx + 1) % DETECT_BATCH === 0 || idx === allPhotos.length - 1) {
+            flushBatch();
+          }
+        }
+
+        // Wait for all background move batches to complete
+        await Promise.all(pendingMoves);
+
+        emitProgress({
+          operation: "findPerson", stage: "done",
+          processed: allPhotos.length, total: allPhotos.length,
+          message: `Done — moved ${movedCount} of ${matched} matched photos to ${personName}/`,
+          personName,
+        });
+
+        sendResponse({
+          ok: true,
+          personName,
+          matched,
+          movedCount,
+          scanned: allPhotos.length,
+          folderId: personFolder.id,
+        });
+
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Clear all face data ────────────────────────────────────────────────────
+    if (msg.type === "CLEAR_FACE_DB") {
+      try {
+        await faceDB.clearAll();
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    sendResponse({ ok: false, error: "Unknown message type." });
+  })();
+
+  return true;
+});
+
+// ── Face clustering helpers ────────────────────────────────────────────────────
+// Both embeddings are L2-normalised so dot product = cosine similarity.
+function cosineSim(a, b) {
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot;
+}
+
+// Running-mean centroid update, then re-normalise.
+function centroidUpdate(centroid, newEmb, n) {
+  const dim     = centroid.length;
+  const updated = new Array(dim);
+  for (let i = 0; i < dim; i++) updated[i] = (centroid[i] * n + newEmb[i]) / (n + 1);
+  const norm = Math.sqrt(updated.reduce((s, x) => s + x * x, 0)) || 1;
+  return updated.map(x => x / norm);
+}

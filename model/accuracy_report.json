@@ -1,0 +1,63 @@
+{
+  "overall_accuracy_pct": 85.64,
+  "total_gt": 2582,
+  "total_drive": 4081,
+  "matched": 1936,
+  "correct": 1658,
+  "per_class": {
+    "animals": {
+      "gt_count": 101,
+      "drive_count": 132,
+      "correct": 61,
+      "missed": 40,
+      "precision": 0.4621,
+      "recall": 0.604,
+      "f1": 0.5236,
+      "misclassified_as": {
+        "junk": 14
+      }
+    },
+    "group photos": {
+      "gt_count": 890,
+      "drive_count": 1267,
+      "correct": 522,
+      "missed": 368,
+      "precision": 0.412,
+      "recall": 0.5865,
+      "f1": 0.484,
+      "misclassified_as": {
+        "animals": 3,
+        "human": 31,
+        "junk": 118
+      }
+    },
+    "human": {
+      "gt_count": 658,
+      "drive_count": 742,
+      "correct": 362,
+      "missed": 296,
+      "precision": 0.4879,
+      "recall": 0.5502,
+      "f1": 0.5172,
+      "misclassified_as": {
+        "animals": 4,
+        "junk": 91,
+        "group photos": 7
+      }
+    },
+    "junk": {
+      "gt_count": 933,
+      "drive_count": 1940,
+      "correct": 713,
+      "missed": 220,
+      "precision": 0.3675,
+      "recall": 0.7642,
+      "f1": 0.4963,
+      "misclassified_as": {
+        "group photos": 7,
+        "human": 2,
+        "animals": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,211 @@
+{
+  "classes": [
+    "animals",
+    "human",
+    "junk",
+    "nature",
+    "other"
+  ],
+  "history": [
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 1,
+      "train_loss": 0.2615786746507172,
+      "train_acc": 0.9021461136439453,
+      "val_loss": 0.3854532629505141,
+      "val_acc": 0.8727634194831014
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 2,
+      "train_loss": 0.16077674401226635,
+      "train_acc": 0.9313910819526299,
+      "val_loss": 0.141342455236668,
+      "val_acc": 0.9527833001988072
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 3,
+      "train_loss": 0.14024074381097437,
+      "train_acc": 0.9438452129434004,
+      "val_loss": 0.18070729734157592,
+      "val_acc": 0.9304174950298211
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 4,
+      "train_loss": 0.12574620267036002,
+      "train_acc": 0.9496274880462582,
+      "val_loss": 0.1208862077188354,
+      "val_acc": 0.955765407554672
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 5,
+      "train_loss": 0.11482427734581313,
+      "train_acc": 0.9546313799621928,
+      "val_loss": 0.15747355286816087,
+      "val_acc": 0.9428429423459245
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 6,
+      "train_loss": 0.08828654337641655,
+      "train_acc": 0.9624152118314244,
+      "val_loss": 0.15431258541015283,
+      "val_acc": 0.941351888667992
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 7,
+      "train_loss": 0.09019677493757286,
+      "train_acc": 0.9645279661959302,
+      "val_loss": 0.07647759871437931,
+      "val_acc": 0.967196819085487
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 8,
+      "train_loss": 0.0864870565646511,
+      "train_acc": 0.9685310797286779,
+      "val_loss": 0.0867542567765655,
+      "val_acc": 0.9657057654075547
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 9,
+      "train_loss": 0.07653698276110754,
+      "train_acc": 0.9697542533081286,
+      "val_loss": 0.09592409967039814,
+      "val_acc": 0.9622266401590457
+    },
+    {
+      "phase": "Phase 1: Classifier Head",
+      "epoch": 10,
+      "train_loss": 0.07795865021096736,
+      "train_acc": 0.9696430557099966,
+      "val_loss": 0.1105078214744317,
+      "val_acc": 0.9547713717693836
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 1,
+      "train_loss": 0.086757286919127,
+      "train_acc": 0.9708662292894473,
+      "val_loss": 0.07796387209751451,
+      "val_acc": 0.9746520874751491
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 2,
+      "train_loss": 0.052977902762758364,
+      "train_acc": 0.9806516179250528,
+      "val_loss": 0.03831065840187519,
+      "val_acc": 0.9860834990059643
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 3,
+      "train_loss": 0.0370513559350665,
+      "train_acc": 0.9845435338596686,
+      "val_loss": 0.025285255839333488,
+      "val_acc": 0.9910536779324056
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 4,
+      "train_loss": 0.030108115827503387,
+      "train_acc": 0.9877682642054931,
+      "val_loss": 0.019798312003067,
+      "val_acc": 0.9930417495029821
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 5,
+      "train_loss": 0.027940681987637495,
+      "train_acc": 0.9905482041587902,
+      "val_loss": 0.015550547218915104,
+      "val_acc": 0.9945328031809145
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 6,
+      "train_loss": 0.02753038636394662,
+      "train_acc": 0.9896586233737351,
+      "val_loss": 0.015173148008874733,
+      "val_acc": 0.9935387673956262
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 7,
+      "train_loss": 0.024932687050103396,
+      "train_acc": 0.9902146113643945,
+      "val_loss": 0.01755694655252906,
+      "val_acc": 0.9920477137176938
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 8,
+      "train_loss": 0.02058475655538264,
+      "train_acc": 0.9919937729345046,
+      "val_loss": 0.01294085833811893,
+      "val_acc": 0.9955268389662028
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 9,
+      "train_loss": 0.014576942308066563,
+      "train_acc": 0.9947737128878016,
+      "val_loss": 0.01967373758861072,
+      "val_acc": 0.9915506958250497
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 10,
+      "train_loss": 0.016762900221618558,
+      "train_acc": 0.9947737128878016,
+      "val_loss": 0.01506822849122362,
+      "val_acc": 0.9945328031809145
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 11,
+      "train_loss": 0.01344266619527501,
+      "train_acc": 0.9945513176915378,
+      "val_loss": 0.014189710830778834,
+      "val_acc": 0.9940357852882704
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 12,
+      "train_loss": 0.009824167052951202,
+      "train_acc": 0.9968864672523073,
+      "val_loss": 0.0202566203259406,
+      "val_acc": 0.9910536779324056
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 13,
+      "train_loss": 0.009163105695651956,
+      "train_acc": 0.9964416768597798,
+      "val_loss": 0.02420058100450179,
+      "val_acc": 0.992544731610338
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 14,
+      "train_loss": 0.007813523235196143,
+      "train_acc": 0.996219281663516,
+      "val_loss": 0.01337208791960123,
+      "val_acc": 0.9935387673956262
+    },
+    {
+      "phase": "Phase 2: Fine-tuning",
+      "epoch": 15,
+      "train_loss": 0.008682378541104489,
+      "train_acc": 0.9959968864672523,
+      "val_loss": 0.014737766111542261,
+      "val_acc": 0.9935387673956262
+    }
+  ]
+}

@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Drive Photo Classifier</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+
+    <!-- ── Full-page app shell ── -->
+    <div class="app-bg">
+      <div class="app-card">
+
+        <!-- ══ HEADER ══ -->
+        <header class="app-header">
+          <div class="app-logo">
+            <div class="app-logo-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <rect x="3" y="3" width="18" height="18" rx="3"/>
+                <circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" stroke="none"/>
+                <path d="M21 15l-5-5L5 21"/>
+              </svg>
+            </div>
+            <div>
+              <div class="app-logo-name">Drive Photo Classifier</div>
+            </div>
+          </div>
+          <div class="app-header-right">
+            <button class="hdr-btn hidden" id="copyTokenBtn" title="Copy OAuth token">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                <path d="M15 7H7a2 2 0 00-2 2v9a2 2 0 002 2h8a2 2 0 002-2V9a2 2 0 00-2-2z"/>
+                <path d="M9 7V5a2 2 0 012-2h6a2 2 0 012 2v9a2 2 0 01-2 2h-2"/>
+              </svg>
+            </button>
+            <button class="hdr-btn hdr-btn-outline hidden" id="signOutBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
+                <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
+                <polyline points="16 17 21 12 16 7"/>
+                <line x1="21" y1="12" x2="9" y2="12"/>
+              </svg>
+              Sign Out
+            </button>
+          </div>
+        </header>
+
+        <!-- ══ AUTH VIEW ══ -->
+        <div class="auth-view hidden" id="authView">
+          <div class="auth-hero">
+            <div class="auth-hero-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="3" y="3" width="18" height="18" rx="3"/>
+                <circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" stroke="none"/>
+                <path d="M21 15l-5-5L5 21"/>
+              </svg>
+            </div>
+            <h1 class="auth-title">Organise your photos with AI</h1>
+            <p class="auth-desc">Connect Google Drive to automatically sort your photos into Animals, People, Groups and more — your photos are never shared with any third-party server.</p>
+            <button class="btn-signin" id="signInBtn">
+              <svg class="google-icon" viewBox="0 0 24 24" width="20" height="20">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+              </svg>
+              Continue with Google
+            </button>
+          </div>
+        </div>
+
+        <!-- ══ MAIN VIEW ══ -->
+        <div class="main-view hidden" id="mainView">
+
+          <!-- Tab bar -->
+          <div class="tab-bar">
+            <button class="tab-btn tab-btn--active" id="tabSort"   data-tab="sort">📂 Sort</button>
+            <button class="tab-btn"                 id="tabPeople" data-tab="people">🗂️ Organise</button>
+          </div>
+
+          <!-- ── TAB: Sort ── -->
+          <div class="tab-panel" id="panelSort">
+
+            <!-- Status banner -->
+            <div class="status-row" id="statusBanner">
+              <span class="status-dot" id="statusDot"></span>
+              <span class="status-text" id="statusText">Ready to sort.</span>
+            </div>
+
+            <!-- Stats grid -->
+            <div class="stats-grid" id="statsGrid">
+              <a class="scard" id="scardHuman"   href="#" target="_blank" rel="noopener">
+                <span class="scard-emoji">👤</span>
+                <span class="scard-count" id="scntHuman">0</span>
+                <span class="scard-label">Human</span>
+                <span class="scard-size"  id="ssizeHuman"></span>
+                <div class="scard-bar"><div class="scard-fill sc-human" id="sbarHuman"></div></div>
+              </a>
+              <a class="scard" id="scardGroup"   href="#" target="_blank" rel="noopener">
+                <span class="scard-emoji">👥</span>
+                <span class="scard-count" id="scntGroup">0</span>
+                <span class="scard-label">Group</span>
+                <span class="scard-size"  id="ssizeGroup"></span>
+                <div class="scard-bar"><div class="scard-fill sc-group" id="sbarGroup"></div></div>
+              </a>
+              <a class="scard" id="scardAnimals" href="#" target="_blank" rel="noopener">
+                <span class="scard-emoji">🐾</span>
+                <span class="scard-count" id="scntAnimals">0</span>
+                <span class="scard-label">Animals</span>
+                <span class="scard-size"  id="ssizeAnimals"></span>
+                <div class="scard-bar"><div class="scard-fill sc-animals" id="sbarAnimals"></div></div>
+              </a>
+              <a class="scard" id="scardJunk"    href="#" target="_blank" rel="noopener">
+                <span class="scard-emoji">🗑️</span>
+                <span class="scard-count" id="scntJunk">0</span>
+                <span class="scard-label">Junk</span>
+                <span class="scard-size"  id="ssizeJunk"></span>
+                <div class="scard-bar"><div class="scard-fill sc-junk" id="sbarJunk"></div></div>
+              </a>
+              <a class="scard" id="scardUnsure"  href="#" target="_blank" rel="noopener">
+                <span class="scard-emoji">❓</span>
+                <span class="scard-count" id="scntUnsure">0</span>
+                <span class="scard-label">Unsure</span>
+                <span class="scard-size"  id="ssizeUnsure"></span>
+                <div class="scard-bar"><div class="scard-fill sc-unsure" id="sbarUnsure"></div></div>
+              </a>
+              <a class="scard" id="scardVideos"  href="#" target="_blank" rel="noopener">
+                <span class="scard-emoji">🎬</span>
+                <span class="scard-count" id="scntVideos">0</span>
+                <span class="scard-label">Videos</span>
+                <span class="scard-size"  id="ssizeVideos"></span>
+                <div class="scard-bar"><div class="scard-fill sc-videos" id="sbarVideos"></div></div>
+              </a>
+            </div>
+
+            <!-- Progress block -->
+            <div class="progress-block hidden" id="progressWrap">
+              <div class="progress-header">
+                <span id="progressLabel" class="prog-label">Working…</span>
+                <span id="progressMeta"  class="prog-meta"></span>
+              </div>
+              <div class="prog-track">
+                <div id="progressBar" class="prog-bar"></div>
+              </div>
+            </div>
+
+            <!-- Post-sort review prompt -->
+            <div class="review-prompt hidden" id="reviewPrompt">
+              <span class="review-prompt-icon">🤔</span>
+              <div class="review-prompt-text">
+                <strong id="reviewPromptCount"></strong> went to Unsure — quick review?
+              </div>
+              <button class="review-prompt-btn" id="reviewPromptBtn">Review Now</button>
+              <button class="review-prompt-close" id="reviewPromptClose" title="Dismiss">×</button>
+            </div>
+
+            <!-- Folder chips -->
+            <div id="folders" class="folder-chips"></div>
+
+            <!-- Disclaimer -->
+            <div class="disclaimer-box">
+              <span class="disclaimer-icon">⚠️</span>
+              <div class="disclaimer-text">
+                <strong>Review before trusting.</strong> AI classification isn't perfect — please check each folder in Google Drive before deleting or acting on any photos.
+              </div>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="action-row">
+              <button class="btn-sort" id="sortBtn" disabled>
+                <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"/>
+                </svg>
+                <span id="sortBtnLabel">Sort Drive Photos</span>
+              </button>
+              <div class="btn-row-secondary">
+                <button class="btn-stop hidden" id="stopBtn">
+                  <svg viewBox="0 0 20 20" fill="currentColor" width="13" height="13">
+                    <rect x="4" y="4" width="12" height="12" rx="2"/>
+                  </svg>
+                  Stop
+                </button>
+                <button class="btn-resort" id="resortBtn" disabled title="Re-classify every photo from scratch">
+                  <svg viewBox="0 0 20 20" fill="currentColor" width="13" height="13">
+                    <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v4a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>
+                  </svg>
+                  Re-sort All
+                </button>
+              </div>
+            </div>
+
+          </div><!-- /panelSort -->
+
+          <!-- ── TAB: Organise by Person ── -->
+          <div class="tab-panel hidden" id="panelPeople">
+
+            <div class="org-section" id="orgSection">
+              <p class="org-desc">Upload a reference photo of someone → all their solo photos from Human, Junk &amp; Unsure folders move to their own folder automatically.</p>
+
+              <div class="org-cards" id="orgCards">
+                <div class="org-add-card" id="orgAddCard">
+                  <input type="file" id="orgPhotoInput" accept="image/*" class="hidden" />
+                  <div class="org-preview org-preview--multi" id="orgPreview"></div>
+                  <input type="text" class="org-name-input" id="orgNameInput" maxlength="40" placeholder="Person's name (e.g. Sargam)" />
+                  <button class="btn-org-find" id="orgFindBtn" disabled>🔍 Find &amp; Move Photos</button>
+                </div>
+              </div>
+
+              <!-- Progress block (people tab) -->
+              <div class="progress-block hidden" id="orgProgressWrap">
+                <div class="progress-header">
+                  <span id="orgProgressLabel" class="prog-label">Working…</span>
+                  <span id="orgProgressMeta"  class="prog-meta"></span>
+                </div>
+                <div class="prog-track">
+                  <div id="orgProgressBar" class="prog-bar"></div>
+                </div>
+              </div>
+
+              <!-- Result list -->
+              <div class="org-results hidden" id="orgResults"></div>
+            </div>
+
+          </div><!-- /panelPeople -->
+
+        </div><!-- /main-view -->
+
+      </div><!-- /app-card -->
+    </div><!-- /app-bg -->
+
+    <!-- ── Unsure Review modal ── -->
+    <div class="review-overlay hidden" id="reviewOverlay">
+      <div class="review-card">
+
+        <!-- Header -->
+        <div class="review-card-header">
+          <div>
+            <div class="review-card-title">📂 Unsure Review</div>
+          </div>
+          <div class="review-card-right">
+            <span class="review-card-progress" id="reviewProgress">1 / 5</span>
+            <button class="review-close-btn" id="reviewCloseBtn">×</button>
+          </div>
+        </div>
+
+        <!-- Progress bar -->
+        <div class="review-prog-track">
+          <div class="review-prog-bar" id="reviewProgBar"></div>
+        </div>
+
+        <!-- Photo preview -->
+        <div class="review-img-wrap">
+          <img id="reviewImg" class="review-img" src="" alt="" />
+          <div class="review-img-placeholder hidden" id="reviewImgPlaceholder">🖼️</div>
+        </div>
+
+        <!-- File name -->
+        <div class="review-photo-name" id="reviewPhotoName">photo.jpg</div>
+
+        <!-- Category buttons -->
+        <p class="review-question">Where does this photo belong?</p>
+        <div class="review-cat-grid">
+          <button class="review-cat-btn" data-cat="human">
+            <span class="rcb-emoji">👤</span><span class="rcb-label">Human</span>
+          </button>
+          <button class="review-cat-btn" data-cat="group">
+            <span class="rcb-emoji">👥</span><span class="rcb-label">Group</span>
+          </button>
+          <button class="review-cat-btn" data-cat="animals">
+            <span class="rcb-emoji">🐾</span><span class="rcb-label">Animals</span>
+          </button>
+          <button class="review-cat-btn" data-cat="junk">
+            <span class="rcb-emoji">🗑️</span><span class="rcb-label">Junk</span>
+          </button>
+        </div>
+
+        <!-- Skip -->
+        <button class="review-skip-btn" id="reviewSkipBtn">Skip this photo →</button>
+
+        <!-- Disclaimer note -->
+        <div class="review-learn-note">
+          ⚠️ Always verify the sorted folders in Google Drive before deleting anything. The AI can make mistakes — your manual review is the final check.
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ── Drive Photo Picker overlay ── -->
+    <div class="drive-picker-overlay hidden" id="drivePickerOverlay">
+      <div class="drive-picker-card">
+        <div class="drive-picker-header">
+          <span class="drive-picker-title">📁 Pick from Google Drive</span>
+          <button class="drive-picker-close" id="drivePickerClose">×</button>
+        </div>
+        <div class="drive-picker-search">
+          <input type="text" id="drivePickerSearch" placeholder="Search photos…" autocomplete="off" />
+        </div>
+        <div class="drive-picker-grid" id="drivePickerGrid">
+          <div class="drive-picker-loading">Loading photos…</div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>
