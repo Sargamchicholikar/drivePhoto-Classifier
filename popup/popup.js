@@ -4,6 +4,7 @@ const signOutBtn   = document.getElementById("signOutBtn");
 const sortBtn      = document.getElementById("sortBtn");
 const stopBtn      = document.getElementById("stopBtn");
 const resortBtn    = document.getElementById("resortBtn");
+const scanFacesBtn = document.getElementById("scanFacesBtn");
 const sortBtnLabel = document.getElementById("sortBtnLabel");
 const copyTokenBtn = document.getElementById("copyTokenBtn");
 const mainView     = document.getElementById("mainView");
@@ -44,13 +45,19 @@ const foldersEl     = document.getElementById("folders");
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 const tabBtns   = document.querySelectorAll(".tab-btn");
-const tabPanels = { sort: document.getElementById("panelSort"), people: document.getElementById("panelPeople") };
+const tabPanels = {
+  sort:    document.getElementById("panelSort"),
+  people:  document.getElementById("panelPeople"),
+  gphoto:  document.getElementById("panelGPhoto"),
+};
 
 tabBtns.forEach(btn => {
   btn.addEventListener("click", () => {
     const target = btn.dataset.tab;
     tabBtns.forEach(b => b.classList.toggle("tab-btn--active", b.dataset.tab === target));
     Object.entries(tabPanels).forEach(([key, panel]) => panel.classList.toggle("hidden", key !== target));
+    if (target === "gphoto")  gpRefreshPeopleList();
+    if (target === "people")  refreshOrgIndexBanner();
   });
 });
 
@@ -207,8 +214,9 @@ function showSignedIn() {
   authView.classList.add("hidden");
   mainView.classList.remove("hidden");
   signOutBtn.classList.remove("hidden");
-  sortBtn.disabled   = false;
-  resortBtn.disabled = false;
+  sortBtn.disabled      = false;
+  resortBtn.disabled    = false;
+  scanFacesBtn.disabled = false;
   setStatus("Signed in. Ready to sort.", "done");
 }
 
@@ -216,8 +224,9 @@ function showSignedOut() {
   mainView.classList.add("hidden");
   authView.classList.remove("hidden");
   signOutBtn.classList.add("hidden");
-  sortBtn.disabled   = true;
-  resortBtn.disabled = true;
+  sortBtn.disabled      = true;
+  resortBtn.disabled    = true;
+  scanFacesBtn.disabled = true;
 }
 
 // ── Sign in ───────────────────────────────────────────────────────────────────
@@ -377,6 +386,39 @@ resortBtn.addEventListener("click", async () => {
   sortBtn.disabled   = false;
   resortBtn.disabled = false;
   try { setSortRunning(false); } catch (_) {}
+});
+
+// ── Scan Faces ────────────────────────────────────────────────────────────────
+scanFacesBtn.addEventListener("click", async () => {
+  scanFacesBtn.disabled = true;
+  scanFacesBtn.textContent = "⏳ Scanning…";
+  showProgress();
+  setStatus("Scanning faces in Human & Group folders — this may take a while…", "active");
+
+  const res = await sendMessage("SCAN_FACES");
+  if (!res?.ok) {
+    hideProgress();
+    setStatus(`Face scan failed: ${res?.error || "Unknown error"}`, "error");
+    scanFacesBtn.disabled = false;
+    scanFacesBtn.textContent = "🔍 Scan Faces";
+  }
+  // Scan runs in background — completion handled by PROGRESS_UPDATE listener below
+});
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type !== "PROGRESS_UPDATE" || msg?.operation !== "faces") return;
+  if (msg.stage === "done") {
+    hideProgress();
+    setStatus(`Face scan complete — ${msg.indexed ?? "?"} faces indexed.`, "done");
+    scanFacesBtn.disabled = false;
+    scanFacesBtn.textContent = "🔍 Scan Faces";
+    refreshOrgIndexBanner();
+  } else if (msg.stage === "error") {
+    hideProgress();
+    setStatus(msg.message || "Face scan failed.", "error");
+    scanFacesBtn.disabled = false;
+    scanFacesBtn.textContent = "🔍 Scan Faces";
+  }
 });
 
 // ── Sign out ──────────────────────────────────────────────────────────────────
@@ -553,11 +595,50 @@ reviewPromptClose.addEventListener("click", () => reviewPrompt.classList.add("hi
 
 const MAX_REF_PHOTOS = 3;
 
-const orgPhotoInput = document.getElementById("orgPhotoInput");
-const orgPreview    = document.getElementById("orgPreview");
-const orgNameInput  = document.getElementById("orgNameInput");
-const orgFindBtn    = document.getElementById("orgFindBtn");
-const orgResults    = document.getElementById("orgResults");
+const orgPhotoInput    = document.getElementById("orgPhotoInput");
+const orgPreview       = document.getElementById("orgPreview");
+const orgNameInput     = document.getElementById("orgNameInput");
+const orgFindBtn       = document.getElementById("orgFindBtn");
+const orgResults       = document.getElementById("orgResults");
+const orgIndexBanner   = document.getElementById("orgIndexBanner");
+const orgIndexIcon     = document.getElementById("orgIndexIcon");
+const orgIndexText     = document.getElementById("orgIndexText");
+const orgIndexScanLink  = document.getElementById("orgIndexScanLink");
+const orgIndexResetLink = document.getElementById("orgIndexResetLink");
+
+// Load and display face index status whenever the Organise tab is shown
+async function refreshOrgIndexBanner() {
+  const status = await sendMessage("GET_FACE_INDEX_STATUS");
+  const count  = status?.embeddingCount || 0;
+
+  orgIndexBanner.classList.remove("org-index-banner--ready", "org-index-banner--warning");
+
+  if (count > 0) {
+    orgIndexBanner.classList.add("org-index-banner--ready");
+    orgIndexIcon.textContent = "⚡";
+    orgIndexText.textContent = `Face index ready — ${count} faces indexed. Search is instant.`;
+    orgIndexScanLink.classList.add("hidden");
+  } else {
+    orgIndexBanner.classList.add("org-index-banner--warning");
+    orgIndexIcon.textContent = "⚠️";
+    orgIndexText.textContent = "No face index yet — search will scan all photos (slow).";
+    orgIndexScanLink.classList.remove("hidden");
+    orgIndexScanLink.onclick = (e) => {
+      e.preventDefault();
+      // Switch to Sort tab and trigger a face scan notification
+      document.getElementById("tabSort")?.click();
+      setStatus("Go to Organise tab → click Scan Faces to build the index first.", "idle");
+    };
+  }
+}
+
+orgIndexResetLink.addEventListener("click", async (e) => {
+  e.preventDefault();
+  if (!confirm("This will delete all indexed face data. You will need to run Scan Faces again. Continue?")) return;
+  await sendMessage("CLEAR_FACE_DB");
+  await refreshOrgIndexBanner();
+  setStatus("Face index cleared. Run Scan Faces to rebuild with ArcFace.", "idle");
+});
 
 // State — arrays, one entry per reference photo slot
 let _orgEmbeddings   = [];   // [{embedding, thumbnailDataUrl}, ...]
@@ -578,6 +659,15 @@ function renderOrgPreview() {
       img.className = "org-slot-face";
       img.src = _orgEmbeddings[i].thumbnailDataUrl;
       slot.appendChild(img);
+
+      const q = _orgEmbeddings[i].quality || "fair";
+      const qBadge = document.createElement("div");
+      qBadge.className = `org-quality-badge org-quality-badge--${q}`;
+      qBadge.title = q === "good" ? "Good photo — face clearly visible"
+                   : q === "fair" ? "Fair photo — try a closer selfie for better results"
+                   : "Poor photo — face not clear, please replace";
+      qBadge.textContent = q === "good" ? "✓" : q === "fair" ? "~" : "✗";
+      slot.appendChild(qBadge);
 
       const rem = document.createElement("button");
       rem.className = "org-slot-remove";
@@ -684,6 +774,7 @@ orgPhotoInput.addEventListener("change", async () => {
   _orgEmbeddings.splice(_orgActiveSlot, 0, {
     embedding:        res.embedding,
     thumbnailDataUrl: res.thumbnailDataUrl,
+    quality:          res.quality || "fair",
   });
   // Cap at MAX
   if (_orgEmbeddings.length > MAX_REF_PHOTOS) _orgEmbeddings.length = MAX_REF_PHOTOS;
@@ -737,7 +828,8 @@ function setOrgProgress(message, processed, total) {
 
 // Progress updates from background during find-person scan
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type !== "PROGRESS_UPDATE" || msg.operation !== "findPerson") return;
+  if (msg?.type !== "PROGRESS_UPDATE") return;
+  if (msg.operation !== "findPerson" && msg.operation !== "findPersonIndex") return;
   showOrgProgress();
   setOrgProgress(msg.message, msg.processed, msg.total);
 });
@@ -746,21 +838,50 @@ orgFindBtn.addEventListener("click", async () => {
   const name = orgNameInput.value.trim();
   if (!_orgEmbeddings.length || !name) return;
 
-  const centroid = computeCentroid(_orgEmbeddings.map(e => e.embedding));
+  const allEmbeddings = _orgEmbeddings.map(e => e.embedding);
 
-  orgFindBtn.disabled   = true;
-  orgFindBtn.textContent = "⏳ Searching…";
+  orgFindBtn.disabled    = true;
+  orgFindBtn.textContent = "⏳ Checking index…";
   showOrgProgress();
-  setOrgProgress(`Scanning for photos of ${name}…`, 0, 1);
+  setOrgProgress("Checking face index…", 0, 1);
 
-  const res = await sendMessage("FIND_AND_MOVE_PERSON_PHOTOS", {
-    referenceEmbedding: centroid,
-    personName: name,
-    refPhotoCount: _orgEmbeddings.length,
-  });
+  // ── Try index-based search first (instant) ────────────────────────────────
+  const indexStatus = await sendMessage("GET_FACE_INDEX_STATUS");
+  const hasIndex    = (indexStatus?.embeddingCount || 0) > 0;
+
+  let res;
+  if (hasIndex) {
+    setOrgProgress(`Searching ${indexStatus.embeddingCount} indexed faces for ${name}…`, 0, 1);
+    res = await sendMessage("FIND_PERSON_FROM_INDEX", {
+      referenceEmbeddings: allEmbeddings,
+      personName: name,
+    });
+
+    // Show top scores as debug info so we can calibrate threshold
+    if (res?.topSims?.length) {
+      console.log("[FaceSearch] Top similarity scores from index:", res.topSims.map(s => s.toFixed(3)).join(", "));
+      alert(`[Debug] Top similarity scores:\n${res.topSims.map(s => s.toFixed(3)).join(", ")}\n\nMatched: ${res.matched ?? 0} photos\nModel: ${res.model ?? "unknown"}`);
+    }
+
+    // Only fall back to live scan if index truly has no data
+    if (!res?.ok) {
+      res = null;
+    }
+  }
+
+  // ── Fall back to live scan if no index ────────────────────────────────────
+  if (!res) {
+    orgFindBtn.textContent = "⏳ Scanning…";
+    setOrgProgress(`No index found — scanning all photos for ${name}… (this takes time)`, 0, 1);
+    res = await sendMessage("FIND_AND_MOVE_PERSON_PHOTOS", {
+      referenceEmbeddings: allEmbeddings,
+      personName: name,
+      refPhotoCount: _orgEmbeddings.length,
+    });
+  }
 
   hideOrgProgress();
-  orgFindBtn.disabled   = false;
+  orgFindBtn.disabled    = false;
   orgFindBtn.textContent = "🔍 Find & Move Photos";
 
   if (!res?.ok) {
@@ -768,10 +889,16 @@ orgFindBtn.addEventListener("click", async () => {
     return;
   }
 
+  const moved   = res.moved   ?? res.movedCount ?? 0;
+  const scanned = res.matched ?? res.scanned    ?? 0;
   const firstThumb = _orgEmbeddings[0]?.thumbnailDataUrl || null;
-  addOrgResultRow(name, firstThumb, res.movedCount, res.scanned);
 
-  // Reset the upload card for the next person
+  if (res.topSims?.length) {
+    console.info(`[FaceIndex] Top-5 scores: ${res.topSims.slice(0,5).map(s=>s.toFixed(3)).join(", ")} (threshold=0.55)`);
+  }
+
+  addOrgResultRow(name, firstThumb, moved, scanned, hasIndex ? `from ${indexStatus.embeddingCount} indexed faces` : null);
+
   _orgEmbeddings = [];
   _orgActiveSlot = 0;
   orgNameInput.value = "";
@@ -816,13 +943,13 @@ function closeDrivePicker() {
 async function loadDrivePickerFiles() {
   if (_drivePickerBusy) return;
   _drivePickerBusy = true;
-  drivePickerGrid.innerHTML = '<div class="drive-picker-loading">Loading photos from Drive…</div>';
+  drivePickerGrid.innerHTML = '<div class="drive-picker-loading">Loading photos from Human folder…</div>';
 
   const res = await sendMessage("LIST_DRIVE_IMAGES_FOR_PICKER", {});
   _drivePickerBusy = false;
 
   if (!res?.ok || !res.files?.length) {
-    drivePickerGrid.innerHTML = '<div class="drive-picker-loading">No photos found in Drive.</div>';
+    drivePickerGrid.innerHTML = '<div class="drive-picker-loading">No photos found in Human folder.</div>';
     return;
   }
   _drivePickerFiles = res.files;
@@ -897,6 +1024,7 @@ async function selectDrivePhoto(file) {
   _orgEmbeddings.splice(_orgActiveSlot, 0, {
     embedding:        embRes.embedding,
     thumbnailDataUrl: embRes.thumbnailDataUrl,
+    quality:          embRes.quality || "fair",
   });
   if (_orgEmbeddings.length > MAX_REF_PHOTOS) _orgEmbeddings.length = MAX_REF_PHOTOS;
 
@@ -905,7 +1033,7 @@ async function selectDrivePhoto(file) {
 }
 
 // ── Result row ────────────────────────────────────────────────────────────────
-function addOrgResultRow(name, thumbnailUrl, matched, scanned) {
+function addOrgResultRow(name, thumbnailUrl, matched, scanned, indexHint = null) {
   orgResults.classList.remove("hidden");
 
   const row = document.createElement("div");
@@ -923,11 +1051,15 @@ function addOrgResultRow(name, thumbnailUrl, matched, scanned) {
     row.appendChild(ph);
   }
 
+  const meta = indexHint
+    ? `Found ${scanned} matches ${indexHint} · moved ${matched}`
+    : `Scanned ${scanned} · moved ${matched}`;
+
   const info = document.createElement("div");
   info.className = "org-result-info";
   info.innerHTML = `
     <div class="org-result-name">${name}</div>
-    <div class="org-result-meta">Scanned ${scanned} · moved ${matched}</div>
+    <div class="org-result-meta">${meta}</div>
   `;
   row.appendChild(info);
 
@@ -988,8 +1120,158 @@ function addOrgResultRow(name, thumbnailUrl, matched, scanned) {
   // ── Always check for pending Unsure photos on every open,
   //    not just right after a sort. ────────────────────────────────────────────
   autoLaunchUnsureReview();
+  refreshOrgIndexBanner();
 
 })();
+
+// ══════════════════════════════════════════════════════════════════════════
+//  GOOGLE PHOTOS TAB
+// ══════════════════════════════════════════════════════════════════════════
+
+const gpOpenBtn      = document.getElementById("gpOpenBtn");
+const gpRefreshBtn   = document.getElementById("gpRefreshBtn");
+const gpPeopleList   = document.getElementById("gpPeopleList");
+const gpEmptyHint    = document.getElementById("gpEmptyHint");
+const gpProgressWrap = document.getElementById("gpProgressWrap");
+const gpProgressLabel= document.getElementById("gpProgressLabel");
+const gpProgressMeta = document.getElementById("gpProgressMeta");
+const gpProgressBar  = document.getElementById("gpProgressBar");
+const gpResult       = document.getElementById("gpResult");
+
+gpOpenBtn.addEventListener("click", () => {
+  chrome.tabs.create({ url: "https://photos.google.com/people" });
+});
+
+gpRefreshBtn.addEventListener("click", () => gpRefreshPeopleList());
+
+async function gpRefreshPeopleList() {
+  gpRefreshBtn.textContent = "↻ Loading…";
+  gpRefreshBtn.disabled = true;
+  try {
+    const res = await sendMessage("GPHOTO_GET_STATE");
+    if (!res?.ok) {
+      console.error("[GPhoto] GPHOTO_GET_STATE failed:", res);
+      gpEmptyHint.textContent = "Error loading data: " + (res?.error || "unknown");
+      gpEmptyHint.classList.remove("hidden");
+      return;
+    }
+    renderGpPeople(res.people || []);
+  } catch (e) {
+    console.error("[GPhoto] refresh error:", e);
+    gpEmptyHint.textContent = "Error: " + e.message;
+    gpEmptyHint.classList.remove("hidden");
+  } finally {
+    gpRefreshBtn.textContent = "↻ Refresh";
+    gpRefreshBtn.disabled = false;
+  }
+}
+
+function renderGpPeople(people) {
+  const visible = people.filter(p => p.filenameCount > 0 || p.name || p.thumbnailUrl);
+
+  // Clear existing person cards only (keep gpEmptyHint in the DOM)
+  Array.from(gpPeopleList.children).forEach(child => {
+    if (child !== gpEmptyHint) child.remove();
+  });
+  gpEmptyHint.classList.toggle("hidden", visible.length > 0);
+
+  for (const person of visible) {
+    const card = document.createElement("div");
+    card.className = "gp-person-card";
+
+    // Thumbnail
+    if (person.thumbnailUrl) {
+      const img = document.createElement("img");
+      img.className = "gp-person-thumb";
+      img.src = person.thumbnailUrl;
+      img.alt = person.name || "Person";
+      card.appendChild(img);
+    } else {
+      const ph = document.createElement("div");
+      ph.className = "gp-person-thumb-placeholder";
+      ph.textContent = "👤";
+      card.appendChild(ph);
+    }
+
+    // Info
+    const info = document.createElement("div");
+    info.className = "gp-person-info";
+    const nameEl = document.createElement("div");
+    nameEl.className = "gp-person-name";
+    nameEl.textContent = person.name || `Person (${person.id.slice(0, 8)}…)`;
+    const countEl = document.createElement("div");
+    countEl.className = "gp-person-count";
+    countEl.textContent = person.filenameCount > 0
+      ? `${person.filenameCount} photos captured from Google Photos`
+      : "Browse their page in Google Photos to capture photos";
+    info.appendChild(nameEl);
+    info.appendChild(countEl);
+    card.appendChild(info);
+
+    // Actions
+    const actions = document.createElement("div");
+    actions.className = "gp-person-actions";
+
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.className = "gp-person-name-input";
+    nameInput.placeholder = "Drive folder name";
+    nameInput.value = person.name || "";
+    nameInput.maxLength = 40;
+
+    const moveBtn = document.createElement("button");
+    moveBtn.className = "btn-gp-move";
+    moveBtn.textContent = "Move to Drive";
+    moveBtn.disabled = person.filenameCount === 0;
+    moveBtn.addEventListener("click", () => gpStartMove(person.id, nameInput.value.trim() || nameEl.textContent));
+
+    actions.appendChild(nameInput);
+    actions.appendChild(moveBtn);
+    card.appendChild(actions);
+
+    gpPeopleList.appendChild(card);
+    if (!gpEmptyHint.classList.contains("hidden")) gpEmptyHint.classList.add("hidden");
+  }
+}
+
+async function gpStartMove(personId, folderName) {
+  if (!folderName) { alert("Please enter a folder name."); return; }
+
+  gpProgressWrap.classList.remove("hidden");
+  gpResult.classList.add("hidden");
+  gpProgressLabel.textContent = "Searching Drive…";
+  gpProgressMeta.textContent = "";
+  gpProgressBar.style.width = "0%";
+
+  const res = await sendMessage("GPHOTO_MATCH_AND_MOVE", { personId, folderName });
+
+  gpProgressWrap.classList.add("hidden");
+
+  if (!res?.ok) {
+    gpResult.textContent = "Error: " + (res?.error || "Unknown error");
+    gpResult.style.background = "#fee2e2";
+    gpResult.style.borderColor = "#fca5a5";
+    gpResult.style.color = "#991b1b";
+    gpResult.classList.remove("hidden");
+    return;
+  }
+
+  gpResult.style.background = "#d1fae5";
+  gpResult.style.borderColor = "#6ee7b7";
+  gpResult.style.color = "#065f46";
+  gpResult.textContent = `Done! Searched ${res.filenameCount} filenames → found ${res.matched} in Drive → moved ${res.moved} photos to "${folderName}/" folder.`;
+  gpResult.classList.remove("hidden");
+  gpRefreshPeopleList();
+}
+
+// Listen for progress updates from background for gpMatch operation
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type !== "PROGRESS_UPDATE" || msg?.operation !== "gpMatch") return;
+  const pct = msg.total > 0 ? Math.round((msg.processed / msg.total) * 100) : 0;
+  gpProgressLabel.textContent = msg.message || "Working…";
+  gpProgressMeta.textContent = `${msg.processed}/${msg.total}`;
+  gpProgressBar.style.width = pct + "%";
+});
 
 // Returns a human-readable "5 minutes", "2 hours", "3 days" etc.
 function timeSince(ts) {

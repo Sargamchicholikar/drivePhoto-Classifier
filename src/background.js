@@ -44,7 +44,7 @@ chrome.notifications.onClicked.addListener((id) => {
 const SORT_SCAN_PAGE_SIZE            = 1000;
 const SORT_CLASSIFICATION_CHUNK_SIZE = 25;
 const CLASSIFICATION_PARALLELISM     = 4;
-const OFFSCREEN_RUNTIME_VERSION      = "onnx-v7";
+const OFFSCREEN_RUNTIME_VERSION      = "onnx-v8-arcface";
 const ROOT_FOLDER_NAME               = "Smart Photo Organizer";
 const PROCESSED_IDS_KEY              = "processedFileIdsV3";
 const MAX_PROCESSED_IDS              = 50000;
@@ -164,7 +164,9 @@ function probMargin(probs) {
 //   → Fewer Group photos stuck in the Unsure folder
 
 const THRESHOLD_STEP    = 0.004;  // reduction per correction
-const THRESHOLD_MIN     = 0.13;   // never go below this (still requires decent confidence)
+const THRESHOLD_MIN     = 0.13;   // floor for animals/group/junk
+const THRESHOLD_MIN_HUMAN = 0.18; // stricter floor for human — false positives here
+                                   // are more noticeable (wrong person in Human folder)
 
 async function getAdaptiveThresholds() {
   const corrections = await loadCorrections();
@@ -180,7 +182,8 @@ async function getAdaptiveThresholds() {
   const thresholds = {};
   for (const cls of ["animals", "group", "human", "junk"]) {
     const reduction = correctedTo[cls] * THRESHOLD_STEP;
-    thresholds[cls] = Math.max(THRESHOLD_MIN, MARGIN_THRESHOLD - reduction);
+    const floor = cls === "human" ? THRESHOLD_MIN_HUMAN : THRESHOLD_MIN;
+    thresholds[cls] = Math.max(floor, MARGIN_THRESHOLD - reduction);
   }
   return thresholds;
 }
@@ -710,6 +713,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     // ── Face scan: detect faces in Human + Group folders ───────────────────────
     if (msg.type === "SCAN_FACES") {
+      // Respond immediately — the scan runs in background and emits PROGRESS_UPDATE events.
+      // This prevents the Chrome message channel from timing out on large photo libraries.
+      sendResponse({ ok: true, started: true });
+
+      (async () => {
       try {
         await ensureFreshToken();
         await ensureFreshOffscreenRuntime();
@@ -829,15 +837,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         emitProgress({ operation: "faces", stage: "done", processed: allPhotos.length, total: allPhotos.length, message: "Face scan complete." });
 
-        const persons = await faceDB.getAllPersons();
-        sendResponse({
-          ok: true,
-          persons: persons.map(p => ({ id: p.id, name: p.name, photoCount: p.photoCount, thumbnailDataUrl: p.thumbnailDataUrl })),
-          totalScanned: allPhotos.length,
-        });
+        const indexed = await faceDB.getAllEmbeddings();
+        emitProgress({ operation: "faces", stage: "done", processed: allPhotos.length, total: allPhotos.length, message: `Face scan complete — ${indexed.length} faces indexed.`, indexed: indexed.length });
       } catch (err) {
-        sendResponse({ ok: false, error: err.message });
+        emitProgress({ operation: "faces", stage: "error", processed: 0, total: 0, message: `Face scan failed: ${err.message}` });
       }
+      })();
       return;
     }
 
@@ -998,11 +1003,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "LIST_DRIVE_IMAGES_FOR_PICKER") {
       try {
         await ensureFreshToken();
+        const folders = await ensureFolderTree(cachedToken);
+        const humanId = folders.human?.id;
+        const q = humanId
+          ? `'${humanId}' in parents and mimeType contains 'image/' and trashed=false`
+          : `mimeType contains 'image/' and trashed=false`;
         const url = new URL("https://www.googleapis.com/drive/v3/files");
-        url.searchParams.set("q", "mimeType contains 'image/' and trashed=false");
+        url.searchParams.set("q", q);
         url.searchParams.set("orderBy", "modifiedTime desc");
-        url.searchParams.set("pageSize", "40");
+        url.searchParams.set("pageSize", "100");
         url.searchParams.set("fields", "files(id,name,thumbnailLink,mimeType,modifiedTime)");
+        url.searchParams.set("supportsAllDrives", "true");
+        url.searchParams.set("includeItemsFromAllDrives", "true");
         const resp = await fetch(url.toString(), {
           headers: { Authorization: `Bearer ${cachedToken}` },
         });
@@ -1047,12 +1059,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // (NOT Group — group photos contain multiple people) → move matches to
     // Smart Photo Organizer/People/[name]/
     if (msg.type === "FIND_AND_MOVE_PERSON_PHOTOS") {
-      // threshold 0.72: strict enough to filter out family-member false matches
-      const { referenceEmbedding, personName, threshold = 0.72 } = msg;
-      if (!referenceEmbedding || !personName) {
+      const { referenceEmbeddings, referenceEmbedding, personName, threshold = 0.55 } = msg;
+      // Support both single centroid (legacy) and array of embeddings (max-sim mode)
+      const refEmbeddings = referenceEmbeddings || (referenceEmbedding ? [referenceEmbedding] : null);
+      if (!refEmbeddings?.length || !personName) {
         sendResponse({ ok: false, error: "Reference photo and name are required." });
         return;
       }
+
+      // Keep the service worker alive for the duration of the scan.
+      // Chrome MV3 kills service workers after ~5 min of inactivity;
+      // a repeating alarm every 20s resets that timer.
+      const KEEPALIVE_ALARM = "findPersonKeepalive";
+      chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 / 3 }); // every 20s
 
       try {
         await ensureFreshToken();
@@ -1060,12 +1079,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         const folders = await ensureFolderTree(cachedToken);
 
-        // Scan Human, Junk, Unsure — skip Group (group photos have multiple people).
-        // All matches are moved to the person folder regardless of source.
+        // Scan Human only — these are already confirmed solo-person photos,
+        // so face detection is most likely to succeed and match correctly.
         const foldersToScan = [
-          { id: folders.human.id,  name: "Human"  },
-          { id: folders.junk.id,   name: "Junk"   },
-          { id: folders.unsure.id, name: "Unsure" },
+          { id: folders.human.id, name: "Human" },
         ];
 
         // Collect all photos from those three folders
@@ -1097,18 +1114,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const personFolder = await getOrCreateFolder(cachedToken, personName, peopleRoot.id);
 
         let matched = 0, movedCount = 0, scanned = 0;
-
-        // Pipeline: every DETECT_BATCH photos detected, kick off their moves in the
-        // background (Promise.all, up to MOVE_CONCURRENCY parallel Drive calls) without
-        // blocking the detection loop. Detection and moves run simultaneously.
-        const DETECT_BATCH   = 10;
         const MOVE_CONCURRENCY = 5;
-        const pendingMoves   = [];   // background move Promises — awaited at end
-        let   batchMatchIds  = [];   // matches collected in current detection batch
+        const pendingMoves = [];
+        let pendingMoveIds = [];
 
-        function flushBatch() {
-          if (!batchMatchIds.length) return;
-          const ids = batchMatchIds.splice(0);   // drain current batch
+        function flushMoves() {
+          if (!pendingMoveIds.length) return;
+          const ids = pendingMoveIds.splice(0);
           const p = (async () => {
             for (let j = 0; j < ids.length; j += MOVE_CONCURRENCY) {
               const chunk = ids.slice(j, j + MOVE_CONCURRENCY);
@@ -1150,28 +1162,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             });
 
             if (!offRes?.ok || !offRes.faces?.length) continue;
+            if (offRes.faces.length > 1) continue; // skip group photos
 
-            // Single-face filter: skip group/family photos
-            if (offRes.faces.length > 1) continue;
-
-            // Strict threshold to filter out similar-looking family members
-            const sim = cosineSim(offRes.faces[0].embedding, referenceEmbedding);
+            const faceEmb = offRes.faces[0].embedding;
+            const sim = Math.max(...refEmbeddings.map(ref => cosineSim(faceEmb, ref)));
             if (sim >= threshold) {
               matched++;
-              batchMatchIds.push(photo.id);
+              pendingMoveIds.push(photo.id);
             }
           } catch (err) {
             console.warn("[FIND_PERSON] Error on photo", photo.name, err.message);
           }
 
-          // Every DETECT_BATCH photos, kick off moves in background without blocking
-          if ((idx + 1) % DETECT_BATCH === 0 || idx === allPhotos.length - 1) {
-            flushBatch();
-          }
+          if ((idx + 1) % 10 === 0 || idx === allPhotos.length - 1) flushMoves();
         }
 
-        // Wait for all background move batches to complete
         await Promise.all(pendingMoves);
+        chrome.alarms.clear(KEEPALIVE_ALARM);
 
         emitProgress({
           operation: "findPerson", stage: "done",
@@ -1190,7 +1197,296 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         });
 
       } catch (err) {
+        chrome.alarms.clear(KEEPALIVE_ALARM);
         sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Google Photos content-script data relay ───────────────────────────────
+    // These messages arrive from content/gp-relay.js running on photos.google.com.
+    // We accumulate filenames per person cluster in chrome.storage.session so they
+    // survive service-worker restarts within the same browser session.
+
+    if (msg.type === "GPHOTO_FILENAMES") {
+      const { personId, filenames } = msg;
+      if (!personId || !Array.isArray(filenames)) { sendResponse({ ok: true }); return; }
+      try {
+        const key = `gp_names_${personId}`;
+        const stored = await chrome.storage.session.get(key);
+        const existing = new Set(stored[key] || []);
+        filenames.forEach(f => existing.add(f));
+        await chrome.storage.session.set({ [key]: Array.from(existing) });
+        sendResponse({ ok: true, total: existing.size });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+      return;
+    }
+
+    if (msg.type === "GPHOTO_PEOPLE_LIST") {
+      const { people } = msg;
+      if (Array.isArray(people)) {
+        await chrome.storage.session.set({ gp_people_list: people });
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === "GPHOTO_PAGE_CHANGE") {
+      const { personId, name } = msg;
+      if (personId && name) {
+        // Store name so the popup can label the cluster
+        const key = `gp_name_label_${personId}`;
+        await chrome.storage.session.set({ [key]: name });
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+
+    // ── Popup asks for accumulated Google Photos data ──────────────────────────
+    if (msg.type === "GPHOTO_GET_STATE") {
+      const allData = await chrome.storage.session.get(null);
+      const people = allData.gp_people_list || [];
+
+      // Merge captured filename counts into each person entry
+      const enriched = people.map(p => {
+        const filenames = allData[`gp_names_${p.id}`] || [];
+        const label = allData[`gp_name_label_${p.id}`] || p.name || null;
+        return { ...p, name: label, filenameCount: filenames.length };
+      });
+
+      // Also surface any person IDs we have filenames for but no entry in the people list
+      const knownIds = new Set(people.map(p => p.id));
+      for (const key of Object.keys(allData)) {
+        if (!key.startsWith('gp_names_')) continue;
+        const personId = key.replace('gp_names_', '');
+        if (knownIds.has(personId)) continue;
+        const filenames = allData[key] || [];
+        const label = allData[`gp_name_label_${personId}`] || null;
+        enriched.push({ id: personId, name: label, thumbnailUrl: null, filenameCount: filenames.length });
+      }
+
+      sendResponse({ ok: true, people: enriched });
+      return;
+    }
+
+    // ── Match Google Photos filenames → Drive files and move them ─────────────
+    if (msg.type === "GPHOTO_MATCH_AND_MOVE") {
+      const { personId, folderName } = msg;
+      if (!personId || !folderName) {
+        sendResponse({ ok: false, error: "personId and folderName required." });
+        return;
+      }
+
+      const KEEPALIVE_ALARM = "gphotMatchKeepalive";
+      chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 / 3 });
+
+      try {
+        await ensureFreshToken();
+
+        const key = `gp_names_${personId}`;
+        const stored = await chrome.storage.session.get(key);
+        const filenames = stored[key] || [];
+
+        if (!filenames.length) {
+          sendResponse({ ok: false, error: "No filenames captured yet. Open the person's page in Google Photos first." });
+          chrome.alarms.clear(KEEPALIVE_ALARM);
+          return;
+        }
+
+        emitProgress({
+          operation: "gpMatch", stage: "search",
+          processed: 0, total: filenames.length,
+          message: `Searching Drive for ${filenames.length} photo filenames…`,
+        });
+
+        // Create destination folder
+        const root = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
+        const peopleRoot = await getOrCreateFolder(cachedToken, "People", root.id);
+        const personFolder = await getOrCreateFolder(cachedToken, folderName, peopleRoot.id);
+
+        // Search only inside the Human folder so group photos are never moved
+        const folders = await ensureFolderTree(cachedToken);
+        const humanFolderId = folders.human.id;
+
+        // Search Drive in batches of 20 filenames (keeps query under URL limit)
+        const BATCH = 20;
+        const matchedFiles = [];
+        for (let i = 0; i < filenames.length; i += BATCH) {
+          const refreshed = await getAuthToken(false);
+          if (refreshed.ok) cachedToken = refreshed.token;
+
+          const batch = filenames.slice(i, i + BATCH);
+          // Escape single quotes inside filenames
+          const clauses = batch.map(n => `name = '${n.replace(/'/g, "\\'")}'`).join(' or ');
+          const q = `'${humanFolderId}' in parents and (${clauses}) and trashed=false`;
+
+          const url = new URL("https://www.googleapis.com/drive/v3/files");
+          url.searchParams.set("q", q);
+          url.searchParams.set("fields", "files(id,name,parents)");
+          url.searchParams.set("pageSize", "100");
+          url.searchParams.set("supportsAllDrives", "true");
+          url.searchParams.set("includeItemsFromAllDrives", "true");
+
+          const resp = await fetch(url.toString(), {
+            headers: { Authorization: `Bearer ${cachedToken}` },
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            matchedFiles.push(...(data.files || []));
+          }
+
+          emitProgress({
+            operation: "gpMatch", stage: "search",
+            processed: Math.min(i + BATCH, filenames.length), total: filenames.length,
+            message: `Searching… found ${matchedFiles.length} matches so far`,
+          });
+        }
+
+        // Deduplicate (same file may match multiple filenames if names collide)
+        const unique = [...new Map(matchedFiles.map(f => [f.id, f])).values()];
+
+        emitProgress({
+          operation: "gpMatch", stage: "move",
+          processed: 0, total: unique.length,
+          message: `Moving ${unique.length} matched photos to ${folderName}/…`,
+        });
+
+        let moved = 0, failed = 0;
+        for (const file of unique) {
+          try {
+            await moveFileToFolder(cachedToken, file.id, personFolder.id);
+            moved++;
+          } catch (_) { failed++; }
+
+          emitProgress({
+            operation: "gpMatch", stage: "move",
+            processed: moved + failed, total: unique.length,
+            message: `Moving ${moved + failed}/${unique.length}…`,
+          });
+        }
+
+        chrome.alarms.clear(KEEPALIVE_ALARM);
+        emitProgress({
+          operation: "gpMatch", stage: "done",
+          processed: unique.length, total: unique.length,
+          message: `Done — moved ${moved} photos to ${folderName}/`,
+        });
+
+        sendResponse({ ok: true, filenameCount: filenames.length, matched: unique.length, moved, failed, folderId: personFolder.id });
+      } catch (err) {
+        chrome.alarms.clear(KEEPALIVE_ALARM);
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Clear Google Photos session data ──────────────────────────────────────
+    if (msg.type === "GPHOTO_CLEAR") {
+      const allData = await chrome.storage.session.get(null);
+      const gpKeys = Object.keys(allData).filter(k => k.startsWith('gp_'));
+      if (gpKeys.length) await chrome.storage.session.remove(gpKeys);
+      sendResponse({ ok: true });
+      return;
+    }
+
+    // ── Index-based person search (instant — uses pre-built faceDB) ───────────
+    // This replaces FIND_AND_MOVE_PERSON_PHOTOS for users who have already
+    // run SCAN_FACES. Instead of scanning every photo again (2+ hrs), we
+    // compare the reference embedding against all stored embeddings in memory.
+    // 10,000 embeddings compared in < 100 ms.
+    if (msg.type === "FIND_PERSON_FROM_INDEX") {
+      const { referenceEmbeddings, personName, threshold = 0.65 } = msg;
+      if (!referenceEmbeddings?.length || !personName) {
+        sendResponse({ ok: false, error: "Reference photo and name required." });
+        return;
+      }
+      try {
+        await ensureFreshToken();
+
+        const allEmbeddings = await faceDB.getAllEmbeddings();
+        if (!allEmbeddings.length) {
+          sendResponse({ ok: false, error: "NO_INDEX" });
+          return;
+        }
+
+        emitProgress({
+          operation: "findPersonIndex", stage: "match",
+          processed: 0, total: allEmbeddings.length,
+          message: `Searching ${allEmbeddings.length} indexed faces for ${personName}…`,
+        });
+
+        const matchedPhotoIds = new Set();
+        const allSims = [];
+        for (const emb of allEmbeddings) {
+          if (!emb.embedding?.length) continue;
+          const sim = Math.max(...referenceEmbeddings.map(ref => cosineSim(emb.embedding, ref)));
+          allSims.push(sim);
+          if (sim >= threshold) matchedPhotoIds.add(emb.photoId);
+        }
+        allSims.sort((a, b) => b - a);
+        const topSims = allSims.slice(0, 10); // top-10 scores for debugging
+
+        emitProgress({
+          operation: "findPersonIndex", stage: "move",
+          processed: 0, total: matchedPhotoIds.size,
+          message: `Found ${matchedPhotoIds.size} matches — creating folder for ${personName}…`,
+        });
+
+        const root         = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
+        const peopleRoot   = await getOrCreateFolder(cachedToken, "People", root.id);
+        const personFolder = await getOrCreateFolder(cachedToken, personName, peopleRoot.id);
+
+        let moved = 0, failed = 0;
+        const ids = Array.from(matchedPhotoIds);
+        for (let i = 0; i < ids.length; i++) {
+          try {
+            await moveFileToFolder(cachedToken, ids[i], personFolder.id);
+            moved++;
+          } catch (_) { failed++; }
+          emitProgress({
+            operation: "findPersonIndex", stage: "move",
+            processed: i + 1, total: ids.length,
+            message: `Moving ${i + 1}/${ids.length} matched photos…`,
+          });
+        }
+
+        emitProgress({
+          operation: "findPersonIndex", stage: "done",
+          processed: ids.length, total: ids.length,
+          message: `Done — moved ${moved} photos of ${personName}.`,
+        });
+
+        const modelUsed = await new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: "OFFSCREEN_GET_MODEL_INFO" }, r => resolve(r?.model ?? "unknown"));
+        }).catch(() => "unknown");
+
+        sendResponse({
+          ok: true, personName,
+          indexedFaces: allEmbeddings.length,
+          matched: matchedPhotoIds.size,
+          moved, failed,
+          folderId: personFolder.id,
+          topSims,
+          model: modelUsed,
+          threshold,
+        });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Get face index status (how many faces indexed) ─────────────────────────
+    if (msg.type === "GET_FACE_INDEX_STATUS") {
+      try {
+        const allEmbeddings = await faceDB.getAllEmbeddings();
+        const allPhotos     = await faceDB.getAllPersons();
+        const photoFaceCount = (await new Promise(resolve => {
+          faceDB.getAllEmbeddings().then(e => resolve(e.length));
+        }));
+        sendResponse({ ok: true, embeddingCount: allEmbeddings.length, personCount: allPhotos.length });
+      } catch (err) {
+        sendResponse({ ok: true, embeddingCount: 0, personCount: 0 });
       }
       return;
     }
@@ -1213,11 +1509,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ── Face clustering helpers ────────────────────────────────────────────────────
-// Both embeddings are L2-normalised so dot product = cosine similarity.
+// ArcFace (w600k_mbf) outputs unnormalized embeddings (magnitude ≈ 15-20),
+// so raw dot products are in the 200-280 range for same-person pairs.
+// True cosine similarity (dot / |a| * |b|) normalizes this to -1..1.
+// Same-person ArcFace cosine: 0.30–0.60. Family members: 0.10–0.30.
 function cosineSim(a, b) {
-  let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-  return dot;
+  let dot = 0, ma = 0, mb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    ma  += a[i] * a[i];
+    mb  += b[i] * b[i];
+  }
+  const denom = Math.sqrt(ma) * Math.sqrt(mb);
+  return denom > 0 ? dot / denom : 0;
 }
 
 // Running-mean centroid update, then re-normalise.

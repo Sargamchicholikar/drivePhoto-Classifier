@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Drive Photo Classifier",
-  "version": "1.1.0",
+  "version": "1.2.1",
+  "version_name": "1.2.1 (ArcFace Face Search)",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA15NdWTXHYLUH5ttHl1g5L+lJdVCx1ngu/Lb1dVU1W/vU5yM9oVPxsX1Os8CU8vFYyxWqlul9F2iMhK8zO/UEFrZeoHiURIdzGqVp2/Atu6PcClgD25kRNlS7eaw0lZHI+TGoWMV0acqJN2trIyFkMboVhltnc5dHUhJQneNqIsE9+ieTbNOK9/5smi4oL7VguDxN9rPWIninHaJvL1fKtGt55+xed3tBTJUXlSZNYzuZSgwcj6UD4IVWXsoaTBf6S+IfnnodjJrpALJr6qnEFSvjoN4DZHQaO7D5k06B2HBiMnidYmiejdJz8uBi1XbFg3jwng8gmuMJRAL17XU5qQIDAQAB",
   "description": "Organise Google Drive photos into Animals, Groups, Human and Junk using on-device AI. Your photos are never shared with any server.",
   "permissions": [
@@ -19,7 +20,22 @@
   },
   "host_permissions": [
     "https://www.googleapis.com/*",
-    "https://accounts.google.com/*"
+    "https://accounts.google.com/*",
+    "https://lh3.googleusercontent.com/*",
+    "https://photos.google.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://photos.google.com/*"],
+      "js": ["content/gp-relay.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://photos.google.com/*"],
+      "js": ["content/gp-scraper.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
   ],
   "oauth2": {
     "client_id": "738149231002-ob7ebh8dmpae14l8ljsmkkcl84er0r27.apps.googleusercontent.com",

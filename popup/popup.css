@@ -732,6 +732,15 @@ button { cursor: pointer; font-family: inherit; border: none; outline: none; bac
   line-height: 1.2;
 }
 .org-slot-lock { font-size: 18px; opacity: .4; }
+.org-quality-badge {
+  position: absolute; bottom: 2px; right: 3px;
+  width: 16px; height: 16px; border-radius: 50%;
+  font-size: 9px; font-weight: 700; line-height: 16px; text-align: center;
+  z-index: 3; color: #fff;
+}
+.org-quality-badge--good { background: #16a34a; }
+.org-quality-badge--fair { background: #d97706; }
+.org-quality-badge--poor { background: #dc2626; }
 .org-ref-count {
   width: 100%; font-size: 10px; color: var(--brand);
   font-weight: 600; text-align: center; margin-top: 2px;
@@ -982,4 +991,104 @@ button { cursor: pointer; font-family: inherit; border: none; outline: none; bac
   font-size: 11px; color: #6366f1; background: #ede9fe;
   border-radius: 8px; padding: 8px 10px; line-height: 1.5;
   text-align: center;
+}
+
+/* ── Face index status banner (Organise tab) ───────────────────────────── */
+.org-index-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; border-radius: 8px; margin-bottom: 4px;
+  background: #eff6ff; border: 1px solid #bfdbfe;
+  font-size: 12px; color: #1e40af;
+}
+.org-index-banner--ready   { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+.org-index-banner--warning { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+.org-index-icon { font-size: 14px; flex-shrink: 0; }
+.org-index-text { flex: 1; }
+.org-index-scan-link {
+  font-weight: 600; color: inherit; text-decoration: underline;
+  flex-shrink: 0; cursor: pointer;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GOOGLE PHOTOS TAB
+══════════════════════════════════════════════════════════════════════════ */
+.gp-section { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+
+/* Step cards */
+.gp-step {
+  display: flex; gap: 12px; align-items: flex-start;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 14px;
+}
+.gp-step-num {
+  flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--brand); color: #fff;
+  font-size: 12px; font-weight: 700; line-height: 24px; text-align: center;
+}
+.gp-step-body { flex: 1; min-width: 0; }
+.gp-step-title { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
+.gp-step-desc  { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.45; }
+
+.btn-gp-open {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #ea4335; color: #fff;
+  border-radius: 8px; padding: 7px 14px; font-size: 12px; font-weight: 600;
+  transition: background .15s;
+}
+.btn-gp-open:hover { background: #c5221f; }
+
+.btn-gp-refresh {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--white); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; font-size: 12px; color: var(--text);
+  transition: border-color .15s;
+}
+.btn-gp-refresh:hover { border-color: var(--brand); color: var(--brand); }
+
+/* People list */
+.gp-people-list { display: flex; flex-direction: column; gap: 10px; }
+.gp-empty-hint  { font-size: 12px; color: var(--muted); text-align: center; padding: 12px 0; }
+
+/* Person card */
+.gp-person-card {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--white); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 12px;
+}
+.gp-person-thumb {
+  width: 44px; height: 44px; border-radius: 50%;
+  object-fit: cover; flex-shrink: 0; background: var(--bg);
+  border: 2px solid var(--border);
+}
+.gp-person-thumb-placeholder {
+  width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0;
+  background: var(--bg); border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+}
+.gp-person-info { flex: 1; min-width: 0; }
+.gp-person-name { font-weight: 600; font-size: 13px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gp-person-count { font-size: 11px; color: var(--muted); }
+
+.gp-person-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.gp-person-name-input {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; width: 130px;
+  font-family: inherit; color: var(--text);
+}
+.gp-person-name-input:focus { outline: none; border-color: var(--brand); }
+
+.btn-gp-move {
+  background: var(--brand); color: #fff;
+  border-radius: 7px; padding: 5px 12px; font-size: 12px; font-weight: 600;
+  transition: background .15s; white-space: nowrap;
+}
+.btn-gp-move:hover { background: var(--brand-dark); }
+.btn-gp-move:disabled { background: var(--muted); cursor: default; }
+
+/* Result banner */
+.gp-result {
+  background: #d1fae5; border: 1px solid #6ee7b7;
+  border-radius: 10px; padding: 12px 14px;
+  font-size: 13px; color: #065f46; font-weight: 600;
 }

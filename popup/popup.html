@@ -75,6 +75,7 @@
           <div class="tab-bar">
             <button class="tab-btn tab-btn--active" id="tabSort"   data-tab="sort">📂 Sort</button>
             <button class="tab-btn"                 id="tabPeople" data-tab="people">🗂️ Organise</button>
+            <button class="tab-btn"                 id="tabGPhoto" data-tab="gphoto">📸 G-Photos</button>
           </div>
 
           <!-- ── TAB: Sort ── -->
@@ -185,6 +186,9 @@
                   </svg>
                   Re-sort All
                 </button>
+                <button class="btn-resort" id="scanFacesBtn" title="Build face index for instant person search">
+                  🔍 Scan Faces
+                </button>
               </div>
             </div>
 
@@ -194,6 +198,14 @@
           <div class="tab-panel hidden" id="panelPeople">
 
             <div class="org-section" id="orgSection">
+              <!-- Face index status banner -->
+              <div class="org-index-banner" id="orgIndexBanner">
+                <span class="org-index-icon" id="orgIndexIcon">⏳</span>
+                <span class="org-index-text" id="orgIndexText">Checking face index…</span>
+                <a class="org-index-scan-link hidden" id="orgIndexScanLink" href="#">Run Face Scan</a>
+                <a class="org-index-scan-link" id="orgIndexResetLink" href="#" style="color:#e53e3e;margin-left:8px">Reset Index</a>
+              </div>
+
               <p class="org-desc">Upload a reference photo of someone → all their solo photos from Human, Junk &amp; Unsure folders move to their own folder automatically.</p>
 
               <div class="org-cards" id="orgCards">
@@ -221,6 +233,57 @@
             </div>
 
           </div><!-- /panelPeople -->
+
+          <!-- ── TAB: Google Photos Import ── -->
+          <div class="tab-panel hidden" id="panelGPhoto">
+
+            <div class="gp-section">
+
+              <!-- Step 1: Open Google Photos -->
+              <div class="gp-step">
+                <div class="gp-step-num">1</div>
+                <div class="gp-step-body">
+                  <div class="gp-step-title">Open Google Photos → People</div>
+                  <div class="gp-step-desc">Click the button below, then click on the person whose photos you want to import.</div>
+                  <button class="btn-gp-open" id="gpOpenBtn">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+                    Open Google Photos People
+                  </button>
+                </div>
+              </div>
+
+              <!-- Step 2: Person detected -->
+              <div class="gp-step">
+                <div class="gp-step-num">2</div>
+                <div class="gp-step-body">
+                  <div class="gp-step-title">Select a person in Google Photos</div>
+                  <div class="gp-step-desc">As you browse, this panel will show how many photos were captured.</div>
+                  <button class="btn-gp-refresh" id="gpRefreshBtn">↻ Refresh</button>
+                </div>
+              </div>
+
+              <!-- People list (populated by JS) -->
+              <div class="gp-people-list" id="gpPeopleList">
+                <div class="gp-empty-hint" id="gpEmptyHint">No people detected yet — open Google Photos and click on a person.</div>
+              </div>
+
+              <!-- Progress block -->
+              <div class="progress-block hidden" id="gpProgressWrap">
+                <div class="progress-header">
+                  <span id="gpProgressLabel" class="prog-label">Working…</span>
+                  <span id="gpProgressMeta"  class="prog-meta"></span>
+                </div>
+                <div class="prog-track">
+                  <div id="gpProgressBar" class="prog-bar"></div>
+                </div>
+              </div>
+
+              <!-- Result -->
+              <div class="gp-result hidden" id="gpResult"></div>
+
+            </div>
+
+          </div><!-- /panelGPhoto -->
 
         </div><!-- /main-view -->
 

@@ -7,7 +7,7 @@
  * Output: [1, 4] logits → softmax for probabilities
  */
 
-const OFFSCREEN_RUNTIME_VERSION = "onnx-v7";
+const OFFSCREEN_RUNTIME_VERSION = "onnx-v8-arcface";
 const DEFAULT_PARALLELISM       = 4;
 const MAX_PARALLELISM           = 8;
 
@@ -257,8 +257,14 @@ async function classifyPhoto(blob, fileId = null, sessionHashes = null) {
 async function classifyOneFile(file, token, sessionHashes = null) {
   let res;
   if (file.downloadUrl) {
-    res = await fetch(file.downloadUrl);
-  } else {
+    try {
+      res = await fetch(file.downloadUrl);
+    } catch (_) {
+      res = null; // CORS block — fall through to authenticated download
+    }
+  }
+  if (!res?.ok) {
+    // CDN thumbnail blocked (CORS) or unavailable — fall back to authenticated download
     res = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -334,11 +340,33 @@ async function ensureDetector() {
   return detectorPromise;
 }
 
+// Which recognizer model to use.
+// ArcFace (w600k_mbf or w600k_r50) is loaded when present — it is trained on
+// 600 K identities with ArcFace loss and is significantly more accurate than
+// the bundled SFace model.  Preprocessing is identical (127.5/128 normalise).
+// The output tensor name differs between models, so we take the first output
+// key rather than hard-coding "embedding".
+let _recognizerIsArcFace = false;
+
 async function ensureRecognizer() {
-  // Return cached session if already loaded this batch
   if (_recognizerSession) return _recognizerSession;
   ort.env.wasm.wasmPaths  = ortDistBase();
   ort.env.wasm.numThreads = 1;
+
+  // Try ArcFace first (user must drop the file into model_files/)
+  const arcFaceUrl = chrome.runtime.getURL("model_files/face_recognition_arcface.onnx");
+  try {
+    const probe = await fetch(arcFaceUrl, { method: "HEAD" });
+    if (probe.ok) {
+      _recognizerSession = await ort.InferenceSession.create(arcFaceUrl, FACE_SESSION_OPTS);
+      _recognizerIsArcFace = true;
+      console.log("[Face] Using ArcFace recognizer.");
+      return _recognizerSession;
+    }
+  } catch (_) { /* ArcFace not present — fall through */ }
+
+  // Fall back to bundled SFace
+  _recognizerIsArcFace = false;
   _recognizerSession = await ort.InferenceSession.create(
     chrome.runtime.getURL("model_files/face_recognition.onnx"),
     FACE_SESSION_OPTS
@@ -429,7 +457,7 @@ function decodeFaceDetections(locData, clsData, iouData, scoreThreshold = 0.5) {
   const W = FACE_DET_SIZE, H = FACE_DET_SIZE;
   const N = priors.length / 3;    // 8 400 anchors
 
-  const boxes = [], scores = [];
+  const boxes = [], scores = [], landmarks = [];
 
   for (let i = 0; i < N; i++) {
     // cls/iou may be pre-sigmoid (YuNet 2023) or raw logits (custom model).
@@ -455,24 +483,48 @@ function decodeFaceDetections(locData, clsData, iouData, scoreThreshold = 0.5) {
     const x2 = Math.min(1, (cx_px + r * stride) / W);
     const y2 = Math.min(1, (cy_px + b * stride) / H);
 
-    if (x2 > x1 && y2 > y1) { boxes.push([x1, y1, x2, y2]); scores.push(score); }
+    // Decode 5 landmarks: leftEye, rightEye, noseTip, leftMouth, rightMouth
+    const lms = [];
+    for (let k = 0; k < 5; k++) {
+      const kx = locData[li + 4 + k * 2];
+      const ky = locData[li + 4 + k * 2 + 1];
+      lms.push([(cx_px + kx * stride) / W, (cy_px + ky * stride) / H]);
+    }
+
+    if (x2 > x1 && y2 > y1) { boxes.push([x1, y1, x2, y2]); scores.push(score); landmarks.push(lms); }
   }
 
   if (!boxes.length) return [];
-  return nms(boxes, scores, 0.4).map(i => ({ box: boxes[i], score: scores[i] }));
+  return nms(boxes, scores, 0.4).map(i => ({ box: boxes[i], score: scores[i], landmarks: landmarks[i] }));
 }
 
 // ── Extract face embedding from a canvas region ────────────────────────────────
 // Input: detCanvas (640×640), box in normalised [0,1] coords
 // Output: 512-dim L2-normalised Float32Array
-async function extractFaceEmbedding(detCanvas, box) {
-  const [x1, y1, x2, y2] = box;
+async function extractFaceEmbedding(detCanvas, box, lms) {
   const W = detCanvas.width, H = detCanvas.height;
+  let cx1, cy1, cx2, cy2;
 
-  // Expand bbox by 20% on each side to include hair/chin
-  const padX = (x2 - x1) * 0.2, padY = (y2 - y1) * 0.2;
-  const cx1 = Math.max(0, (x1 - padX) * W), cy1 = Math.max(0, (y1 - padY) * H);
-  const cx2 = Math.min(W, (x2 + padX) * W), cy2 = Math.min(H, (y2 + padY) * H);
+  if (lms && lms.length >= 2) {
+    // Landmark-aligned crop using eye positions — consistent regardless of bbox position
+    const [lex, ley] = lms[0]; // left eye (normalized)
+    const [rex, rey] = lms[1]; // right eye (normalized)
+    const eyeD = Math.sqrt((rex - lex) ** 2 + (rey - ley) ** 2);
+    const mx = (lex + rex) / 2, my = (ley + rey) / 2;
+    // Crop: 1.8x eye-dist on each side, 1.4x above eyes (forehead), 2.2x below (chin)
+    cx1 = Math.max(0, (mx - eyeD * 1.8) * W);
+    cy1 = Math.max(0, (my - eyeD * 1.4) * H);
+    cx2 = Math.min(W, (mx + eyeD * 1.8) * W);
+    cy2 = Math.min(H, (my + eyeD * 2.2) * H);
+  } else {
+    // Fallback: bbox + padding
+    const [x1, y1, x2, y2] = box;
+    const faceW = x2 - x1, faceH = y2 - y1;
+    cx1 = Math.max(0, (x1 - faceW * 0.25) * W);
+    cy1 = Math.max(0, (y1 - faceH * 0.5)  * H);
+    cx2 = Math.min(W, (x2 + faceW * 0.25) * W);
+    cy2 = Math.min(H, (y2 + faceH * 0.15) * H);
+  }
 
   const CROP = 112;
   const cropCanvas = new OffscreenCanvas(CROP, CROP);
@@ -490,19 +542,34 @@ async function extractFaceEmbedding(detCanvas, box) {
   }
 
   const recognizer = await ensureRecognizer();
-  const tensor = new ort.Tensor("float32", input, [1, 3, CROP, CROP]);
-  const out    = await recognizer.run({ "input.1": tensor });
-  return Array.from(out.embedding.data); // [512] L2-normalised
+  const tensor  = new ort.Tensor("float32", input, [1, 3, CROP, CROP]);
+  const out     = await recognizer.run({ "input.1": tensor });
+  // SFace exports "embedding" as the feature output.
+  // ArcFace (w600k_mbf / w600k_r50) uses a numeric node-ID key like "683".
+  // Try "embedding" first (SFace), then fall back to first key (ArcFace).
+  const outKey = out.embedding ? "embedding" : Object.keys(out)[0];
+  return Array.from(out[outKey].data);
 }
 
 // ── Generate a small JPEG thumbnail for a face region ─────────────────────────
-async function getFaceThumbnail(detCanvas, box) {
-  const [x1, y1, x2, y2] = box;
+async function getFaceThumbnail(detCanvas, box, lms) {
   const W = detCanvas.width, H = detCanvas.height;
+  let cx1, cy1, cx2, cy2;
 
-  const padX = (x2 - x1) * 0.2, padY = (y2 - y1) * 0.2;
-  const cx1 = Math.max(0, (x1 - padX) * W), cy1 = Math.max(0, (y1 - padY) * H);
-  const cx2 = Math.min(W, (x2 + padX) * W), cy2 = Math.min(H, (y2 + padY) * H);
+  if (lms && lms.length >= 2) {
+    const [lex, ley] = lms[0], [rex, rey] = lms[1];
+    const eyeD = Math.sqrt((rex - lex) ** 2 + (rey - ley) ** 2);
+    const mx = (lex + rex) / 2, my = (ley + rey) / 2;
+    cx1 = Math.max(0, (mx - eyeD * 1.8) * W);
+    cy1 = Math.max(0, (my - eyeD * 1.4) * H);
+    cx2 = Math.min(W, (mx + eyeD * 1.8) * W);
+    cy2 = Math.min(H, (my + eyeD * 2.2) * H);
+  } else {
+    const [x1, y1, x2, y2] = box;
+    const faceW = x2 - x1, faceH = y2 - y1;
+    cx1 = Math.max(0, (x1 - faceW * 0.2) * W); cy1 = Math.max(0, (y1 - faceH * 0.4) * H);
+    cx2 = Math.min(W, (x2 + faceW * 0.2) * W); cy2 = Math.min(H, (y2 + faceH * 0.2) * H);
+  }
 
   const THUMB = 80;
   const thumbCanvas = new OffscreenCanvas(THUMB, THUMB);
@@ -522,7 +589,14 @@ async function detectFacesInBlob(blob) {
   const D = FACE_DET_SIZE;
   const detCanvas = new OffscreenCanvas(D, D);
   const ctx = detCanvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(bitmap, 0, 0, D, D);
+
+  // Letterbox to preserve aspect ratio — prevents face distortion on portrait photos
+  const scale = Math.min(D / bitmap.width, D / bitmap.height);
+  const sw = bitmap.width * scale, sh = bitmap.height * scale;
+  const ox = (D - sw) / 2, oy = (D - sh) / 2;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, D, D);
+  ctx.drawImage(bitmap, ox, oy, sw, sh);
   bitmap.close();
 
   const { data } = ctx.getImageData(0, 0, D, D);
@@ -552,10 +626,10 @@ async function detectFacesInBlob(blob) {
   for (const det of detections) {
     try {
       const [embedding, thumbnailDataUrl] = await Promise.all([
-        extractFaceEmbedding(detCanvas, det.box),
-        getFaceThumbnail(detCanvas, det.box),
+        extractFaceEmbedding(detCanvas, det.box, det.landmarks),
+        getFaceThumbnail(detCanvas, det.box, det.landmarks),
       ]);
-      faces.push({ box: det.box, score: det.score, embedding, thumbnailDataUrl });
+      faces.push({ box: det.box, score: det.score, landmarks: det.landmarks, embedding, thumbnailDataUrl });
     } catch (err) {
       console.warn("[Face] Skipping face due to error:", err.message);
     }
@@ -576,6 +650,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
 
+    if (msg.type === "OFFSCREEN_GET_MODEL_INFO") {
+      sendResponse({ ok: true, model: _recognizerIsArcFace ? "ArcFace (w600k_mbf)" : "SFace" });
+      return;
+    }
+
     if (msg.type === "OFFSCREEN_CLASSIFY_FILES") {
       const { files = [], token, parallelism } = msg;
       if (!token) { sendResponse({ ok: false, error: "Missing auth token." }); return; }
@@ -592,22 +671,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         let blob;
 
         if (thumbnailUrl) {
-          // ── Fast path: use Drive CDN thumbnail (no auth needed, ~100KB vs ~5MB) ──
-          // thumbnailUrl is already sized to w800 — plenty for YuNet (640px) + SFace (112px crop)
-          const res = await fetch(thumbnailUrl);
-          if (res.ok) {
-            blob = await res.blob();
-          } else {
-            // CDN link expired or unavailable → fall back to authenticated full download
-            if (!token) { sendResponse({ ok: false, error: "No token for fallback." }); return; }
-            const fallback = await fetch(
-              `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            if (!fallback.ok) { sendResponse({ ok: false, error: `Cannot fetch ${file.name}: ${fallback.status}` }); return; }
-            blob = await fallback.blob();
-          }
-        } else {
+          // Try CDN thumbnail first (fast, ~100KB). Falls back to authenticated
+          // download if CORS-blocked or unavailable (e.g. lh3.googleusercontent.com
+          // not yet in host_permissions).
+          try {
+            const res = await fetch(thumbnailUrl);
+            if (res.ok) blob = await res.blob();
+          } catch (_) { /* CORS block — fall through to authenticated download */ }
+        }
+        if (!blob) {
           // ── Standard path: authenticated full-resolution download ──
           if (!token) { sendResponse({ ok: false, error: "Missing token." }); return; }
           const res = await fetch(
@@ -631,6 +703,48 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
 
+    // Batch face detection: fetch all thumbnails in parallel, run ONNX sequentially.
+    // ~3-4x faster than one message per photo because network I/O is overlapped with
+    // the previous photo's inference instead of waiting serially for each round-trip.
+    if (msg.type === "OFFSCREEN_DETECT_FACES_BATCH") {
+      const { photos, token } = msg; // photos = [{file, thumbnailUrl}, …]
+      if (!Array.isArray(photos) || !photos.length) {
+        sendResponse({ ok: true, results: [] });
+        return;
+      }
+
+      // Step 1 — fetch all thumbnails concurrently (pure network I/O, no WASM).
+      // CDN thumbnails require lh3.googleusercontent.com in manifest host_permissions.
+      // If CDN is blocked or unavailable, skip the photo — do NOT fall back to
+      // full-res authenticated download, which would download 10×5MB simultaneously
+      // and stall the message channel.
+      const blobs = await Promise.all(photos.map(async ({ file, thumbnailUrl }) => {
+        if (!thumbnailUrl) return null;
+        try {
+          const res = await fetch(thumbnailUrl);
+          return res.ok ? await res.blob() : null;
+        } catch { return null; } // CORS block or network error — skip this photo
+      }));
+
+      // Step 2 — run ONNX detector + recognizer sequentially (single-threaded WASM)
+      const results = [];
+      for (let i = 0; i < photos.length; i++) {
+        if (!blobs[i]) { results.push({ ok: false, error: "fetch_failed" }); continue; }
+        try {
+          const faces = await detectFacesInBlob(blobs[i]);
+          results.push({ ok: true, faces });
+        } catch (err) {
+          results.push({ ok: false, error: err.message });
+        }
+      }
+
+      // Only release the 37MB recognizer on the final batch — keeping it loaded
+      // across batches avoids reloading the ONNX model 190+ times per scan.
+      if (msg.releaseSessions) await releaseRecognizer();
+      sendResponse({ ok: true, results });
+      return;
+    }
+
     if (msg.type === "OFFSCREEN_RELEASE_FACE_SESSIONS") {
       await releaseRecognizer();
       sendResponse({ ok: true });
@@ -643,17 +757,69 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const { imageDataUrl } = msg;
       if (!imageDataUrl) { sendResponse({ ok: false, error: "No image data provided." }); return; }
       try {
-        const res  = await fetch(imageDataUrl);
+        const res = await fetch(imageDataUrl);
         const blob = await res.blob();
-        const faces = await detectFacesInBlob(blob);
+        const bmp  = await createImageBitmap(blob);
+        const W = bmp.width, H = bmp.height;
+
+        // Score a candidate face: higher = better. Rewards large area + upper position + high confidence.
+        function faceScore(face) {
+          const area    = (face.box[2] - face.box[0]) * (face.box[3] - face.box[1]);
+          const centerY = (face.box[1] + face.box[3]) / 2;
+          const posBonus = centerY < 0.5 ? 1.2 : centerY < 0.65 ? 1.0 : 0.5;
+          return area * posBonus * (face.score || 1);
+        }
+
+        // Crop a region of the original bitmap and run face detection on it
+        async function detectInRegion(sy, sh) {
+          const cropCanvas = new OffscreenCanvas(W, sh);
+          cropCanvas.getContext("2d").drawImage(bmp, 0, sy, W, sh, 0, 0, W, sh);
+          const cropBlob = await cropCanvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
+          return detectFacesInBlob(cropBlob);
+        }
+
+        // Multi-scale passes: full image → top 45% → top 25%
+        // Each zoom brings the face larger on the 640×640 detection canvas
+        const crops = [
+          { sy: 0, sh: H },           // full image
+          { sy: 0, sh: Math.floor(H * 0.45) },  // top 45% — half-body shots
+          { sy: 0, sh: Math.floor(H * 0.25) },  // top 25% — full-body shots
+        ];
+
+        let bestFace = null, bestScore = -1;
+        for (const { sy, sh } of crops) {
+          if (sh < 80) continue; // too small to be useful
+          const faces = await detectInRegion(sy, sh);
+          for (const face of faces) {
+            const s = faceScore(face);
+            if (s > bestScore) { bestScore = s; bestFace = face; }
+          }
+          // Stop early if we already have a strong result
+          if (bestFace) {
+            const area = (bestFace.box[2] - bestFace.box[0]) * (bestFace.box[3] - bestFace.box[1]);
+            if (area >= 0.10 && (bestFace.box[1] + bestFace.box[3]) / 2 < 0.55) break;
+          }
+        }
+        bmp.close();
+
         await releaseRecognizer();
-        if (!faces.length) {
-          sendResponse({ ok: false, error: "No face detected in the uploaded photo. Please use a clear, front-facing photo." });
+        if (!bestFace) {
+          sendResponse({ ok: false, error: "No face detected. Please use a photo where your face is clearly visible." });
           return;
         }
-        // Return the highest-confidence face embedding
-        const best = faces.reduce((a, b) => (b.score > a.score ? b : a), faces[0]);
-        sendResponse({ ok: true, embedding: best.embedding, thumbnailDataUrl: best.thumbnailDataUrl, facesFound: faces.length });
+
+        // Quality based on landmark eye distance (most reliable signal when landmarks exist)
+        const lms = bestFace.landmarks;
+        let quality;
+        if (lms && lms.length >= 2) {
+          const eyeD = Math.sqrt((lms[1][0]-lms[0][0])**2 + (lms[1][1]-lms[0][1])**2);
+          quality = eyeD >= 0.08 ? "good" : eyeD >= 0.04 ? "fair" : "poor";
+        } else {
+          const faceArea = (bestFace.box[2] - bestFace.box[0]) * (bestFace.box[3] - bestFace.box[1]);
+          quality = faceArea >= 0.08 ? "good" : faceArea >= 0.03 ? "fair" : "poor";
+        }
+
+        sendResponse({ ok: true, embedding: bestFace.embedding, thumbnailDataUrl: bestFace.thumbnailDataUrl, facesFound: 1, quality });
       } catch (err) {
         await releaseRecognizer();
         sendResponse({ ok: false, error: err.message || "Embedding extraction failed." });
