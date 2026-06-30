@@ -593,26 +593,21 @@ reviewPromptClose.addEventListener("click", () => reviewPrompt.classList.add("hi
 // centroid before matching — this pulls the reference away from family members
 // who share similar-but-not-identical facial features.
 
-const MAX_REF_PHOTOS = 3;
-
-const orgPhotoInput    = document.getElementById("orgPhotoInput");
-const orgPreview       = document.getElementById("orgPreview");
-const orgNameInput     = document.getElementById("orgNameInput");
-const orgFindBtn       = document.getElementById("orgFindBtn");
-const orgResults       = document.getElementById("orgResults");
-const orgIndexBanner   = document.getElementById("orgIndexBanner");
-const orgIndexIcon     = document.getElementById("orgIndexIcon");
-const orgIndexText     = document.getElementById("orgIndexText");
+const orgResults        = document.getElementById("orgResults");
+const orgIndexBanner    = document.getElementById("orgIndexBanner");
+const orgIndexIcon      = document.getElementById("orgIndexIcon");
+const orgIndexText      = document.getElementById("orgIndexText");
 const orgIndexScanLink  = document.getElementById("orgIndexScanLink");
 const orgIndexResetLink = document.getElementById("orgIndexResetLink");
+const mpList            = document.getElementById("mpList");
+const mpAddBtn          = document.getElementById("mpAddBtn");
+const mpFindAllBtn      = document.getElementById("mpFindAllBtn");
 
 // Load and display face index status whenever the Organise tab is shown
 async function refreshOrgIndexBanner() {
   const status = await sendMessage("GET_FACE_INDEX_STATUS");
   const count  = status?.embeddingCount || 0;
-
   orgIndexBanner.classList.remove("org-index-banner--ready", "org-index-banner--warning");
-
   if (count > 0) {
     orgIndexBanner.classList.add("org-index-banner--ready");
     orgIndexIcon.textContent = "⚡";
@@ -621,13 +616,11 @@ async function refreshOrgIndexBanner() {
   } else {
     orgIndexBanner.classList.add("org-index-banner--warning");
     orgIndexIcon.textContent = "⚠️";
-    orgIndexText.textContent = "No face index yet — search will scan all photos (slow).";
+    orgIndexText.textContent = "No face index yet — go to Sort tab → Scan Faces first.";
     orgIndexScanLink.classList.remove("hidden");
     orgIndexScanLink.onclick = (e) => {
       e.preventDefault();
-      // Switch to Sort tab and trigger a face scan notification
       document.getElementById("tabSort")?.click();
-      setStatus("Go to Organise tab → click Scan Faces to build the index first.", "idle");
     };
   }
 }
@@ -640,170 +633,256 @@ orgIndexResetLink.addEventListener("click", async (e) => {
   setStatus("Face index cleared. Run Scan Faces to rebuild with ArcFace.", "idle");
 });
 
-// State — arrays, one entry per reference photo slot
-let _orgEmbeddings   = [];   // [{embedding, thumbnailDataUrl}, ...]
-let _orgActiveSlot   = 0;    // which slot the next file input targets
+// ── Multi-person state ─────────────────────────────────────────────────────
+// Each entry: { name, embeddings: [], thumbnailDataUrls: [], cardEl }
+let _mpPersons = [];
+const MP_MAX_SLOTS = 3;
 
-// ── Build / rebuild the multi-photo preview area ───────────────────────────
-function renderOrgPreview() {
-  orgPreview.innerHTML = "";
+function updateMpFindAllBtn() {
+  const ready = _mpPersons.some(p => p.embeddings.some(Boolean) && p.name.trim());
+  mpFindAllBtn.disabled = !ready;
+}
 
-  for (let i = 0; i < MAX_REF_PHOTOS; i++) {
-    const slot = document.createElement("div");
-    slot.className = "org-slot" + (_orgEmbeddings[i] ? " org-slot--filled" : "");
-    slot.dataset.slot = i;
+// ── Person card persistence ────────────────────────────────────────────────
+const MP_STORAGE_KEY = "mpSavedPersonsV2";
 
-    if (_orgEmbeddings[i]) {
-      // Filled: show face thumbnail + remove ×
-      const img = document.createElement("img");
-      img.className = "org-slot-face";
-      img.src = _orgEmbeddings[i].thumbnailDataUrl;
-      slot.appendChild(img);
+function saveMpPersons() {
+  const toSave = _mpPersons
+    .filter(p => p.name.trim() || p.embeddings.some(Boolean))
+    .map(p => ({ name: p.name, embeddings: p.embeddings, thumbnailDataUrls: p.thumbnailDataUrls }));
+  chrome.storage.local.set({ [MP_STORAGE_KEY]: toSave });
+}
 
-      const q = _orgEmbeddings[i].quality || "fair";
-      const qBadge = document.createElement("div");
-      qBadge.className = `org-quality-badge org-quality-badge--${q}`;
-      qBadge.title = q === "good" ? "Good photo — face clearly visible"
-                   : q === "fair" ? "Fair photo — try a closer selfie for better results"
-                   : "Poor photo — face not clear, please replace";
-      qBadge.textContent = q === "good" ? "✓" : q === "fair" ? "~" : "✗";
-      slot.appendChild(qBadge);
+// ── Photo-slot helper ──────────────────────────────────────────────────────
+function makePhotoSlot(personEntry, slotIdx) {
+  const el = document.createElement("div");
+  el.className = "mp-slot";
 
-      const rem = document.createElement("button");
-      rem.className = "org-slot-remove";
-      rem.textContent = "×";
-      rem.title = "Remove this photo";
-      rem.addEventListener("click", (e) => {
-        e.stopPropagation();
-        _orgEmbeddings.splice(i, 1);
-        renderOrgPreview();
-        updateOrgFindBtn();
-      });
-      slot.appendChild(rem);
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "image/*";
+  fileInput.className = "hidden";
+  el.appendChild(fileInput);
 
-      // Badge: photo number
+  function renderEmpty() {
+    // Remove everything except the hidden file input
+    [...el.children].forEach(c => { if (c !== fileInput) c.remove(); });
+    el.classList.remove("has-photo", "drag-over");
+    const ph = document.createElement("span");
+    ph.className = "mp-slot-ph";
+    ph.textContent = slotIdx === 0 ? "📷" : "+";
+    el.appendChild(ph);
+  }
+
+  function renderFilled(thumbUrl, quality) {
+    [...el.children].forEach(c => { if (c !== fileInput) c.remove(); });
+    el.classList.add("has-photo");
+    el.classList.remove("drag-over");
+    const img = document.createElement("img");
+    img.className = "mp-thumb";
+    img.src = thumbUrl;
+    el.appendChild(img);
+    if (quality) {
       const badge = document.createElement("span");
-      badge.className = "org-slot-badge";
-      badge.textContent = i + 1;
-      slot.appendChild(badge);
+      badge.className = "mp-thumb-quality";
+      badge.textContent = quality === "good" ? "✓" : quality === "fair" ? "~" : "✗";
+      badge.style.background = quality === "good" ? "#16a34a" : quality === "fair" ? "#d97706" : "#dc2626";
+      el.appendChild(badge);
+    }
+    const clearBtn = document.createElement("button");
+    clearBtn.className = "mp-slot-clear";
+    clearBtn.textContent = "×";
+    clearBtn.title = "Remove this photo";
+    clearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      personEntry.embeddings[slotIdx] = null;
+      personEntry.thumbnailDataUrls[slotIdx] = null;
+      renderEmpty();
+      updateMpFindAllBtn();
+      saveMpPersons();
+    });
+    el.appendChild(clearBtn);
+  }
 
-    } else if (i === _orgEmbeddings.length) {
-      // Next empty slot: two source buttons — device upload OR Drive picker
-      const uploadBtn = document.createElement("button");
-      uploadBtn.className = "org-upload-btn";
-      uploadBtn.textContent = i === 0 ? "📷 Device" : "📷";
-      uploadBtn.title = "Upload from device";
-      uploadBtn.addEventListener("click", () => {
-        _orgActiveSlot = i;
-        orgPhotoInput.value = "";
-        orgPhotoInput.click();
-      });
-      slot.appendChild(uploadBtn);
+  async function handleFile(file) {
+    [...el.children].forEach(c => { if (c !== fileInput) c.remove(); });
+    el.classList.remove("drag-over");
+    const spin = document.createElement("span");
+    spin.style.cssText = "font-size:11px;color:#6b7280";
+    spin.textContent = "⏳";
+    el.appendChild(spin);
 
-      const driveBtn = document.createElement("button");
-      driveBtn.className = "org-upload-btn org-drive-btn";
-      driveBtn.textContent = i === 0 ? "📁 Drive" : "📁";
-      driveBtn.title = "Pick from Google Drive";
-      driveBtn.addEventListener("click", () => {
-        _orgActiveSlot = i;
-        openDrivePicker();
-      });
-      slot.appendChild(driveBtn);
+    const dataUrl = await new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = ev => resolve(ev.target.result);
+      reader.readAsDataURL(file);
+    });
 
-      // Hint text under first slot
-      if (i === 0) {
-        const hint = document.createElement("span");
-        hint.className = "org-slot-hint";
-        hint.textContent = "Up to 3 photos";
-        slot.appendChild(hint);
-      }
-    } else {
-      // Locked future slot
-      slot.classList.add("org-slot--locked");
-      const lock = document.createElement("span");
-      lock.className = "org-slot-lock";
-      lock.textContent = "🔒";
-      slot.appendChild(lock);
+    const res = await sendMessage("EXTRACT_FACE_EMBEDDING", { imageDataUrl: dataUrl });
+    if (!res?.ok) {
+      renderEmpty();
+      alert("No face detected in that photo.\nPlease use a clear, front-facing portrait.");
+      return;
+    }
+    personEntry.embeddings[slotIdx] = res.embedding;
+    personEntry.thumbnailDataUrls[slotIdx] = res.thumbnailDataUrl;
+    renderFilled(res.thumbnailDataUrl, res.quality || "fair");
+    updateMpFindAllBtn();
+    saveMpPersons();
+  }
+
+  renderEmpty();
+
+  el.addEventListener("click", () => { fileInput.value = ""; fileInput.click(); });
+  fileInput.addEventListener("change", () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+  el.addEventListener("dragover",  (e) => { e.preventDefault(); el.classList.add("drag-over"); });
+  el.addEventListener("dragleave", ()  => { el.classList.remove("drag-over"); });
+  el.addEventListener("drop",      async (e) => {
+    e.preventDefault();
+    el.classList.remove("drag-over");
+
+    // Local file drop (from file explorer or desktop)
+    const f = e.dataTransfer.files[0];
+    if (f) { handleFile(f); return; }
+
+    // Drive web UI drag — detect a Google Drive file URL in the drag data
+    const uriList = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain") || "";
+    const driveMatch = uriList.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+    if (driveMatch) {
+      const fileId = driveMatch[1];
+      [...el.children].forEach(c => { if (c !== fileInput) c.remove(); });
+      const spin = document.createElement("span");
+      spin.style.cssText = "font-size:11px;color:#6b7280";
+      spin.textContent = "⏳";
+      el.appendChild(spin);
+
+      const dlRes = await sendMessage("DOWNLOAD_DRIVE_IMAGE_BASE64", { fileId, mimeType: "image/jpeg" });
+      if (!dlRes?.ok) { renderEmpty(); alert("Could not download that Drive photo.\n" + (dlRes?.error || "")); return; }
+
+      const embRes = await sendMessage("EXTRACT_FACE_EMBEDDING", { imageDataUrl: dlRes.dataUrl });
+      if (!embRes?.ok) { renderEmpty(); alert("No face detected in that Drive photo.\nPlease use a clear, front-facing portrait."); return; }
+
+      personEntry.embeddings[slotIdx] = embRes.embedding;
+      personEntry.thumbnailDataUrls[slotIdx] = embRes.thumbnailDataUrl;
+      renderFilled(embRes.thumbnailDataUrl, embRes.quality || "fair");
+      updateMpFindAllBtn();
+      saveMpPersons();
+      return;
     }
 
-    orgPreview.appendChild(slot);
-  }
+    // Nothing usable was dropped
+    alert("Please drag a photo from your computer, or use the 📁 Drive button to pick from Google Drive.");
+  });
 
-  // Photo count indicator
-  const n = _orgEmbeddings.length;
-  if (n > 0) {
-    const countEl = document.createElement("div");
-    countEl.className = "org-ref-count";
-    countEl.textContent = n === 1
-      ? "1 reference photo  •  add 1–2 more for better accuracy"
-      : n === 2
-        ? "2 reference photos  •  add 1 more for best accuracy"
-        : "3 reference photos  ✓  best accuracy";
-    orgPreview.appendChild(countEl);
-  }
+  return { el, renderFilled, renderEmpty };
 }
 
-// Initialise
-renderOrgPreview();
+// Track which slot is waiting for a Drive pick
+let _drivePickTarget = null; // { personEntry, slotIdx, renderFilled }
 
-// ── Handle file selection ───────────────────────────────────────────────────
-orgPhotoInput.addEventListener("change", async () => {
-  const file = orgPhotoInput.files[0];
-  if (!file) return;
+function createPersonCard(savedData) {
+  const card = document.createElement("div");
+  card.className = "mp-card";
 
-  // Temporarily show spinner in that slot
-  orgFindBtn.disabled   = true;
-  orgFindBtn.textContent = "⏳ Detecting face…";
+  // Header: name + remove
+  const header = document.createElement("div");
+  header.className = "mp-card-header";
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.className = "mp-name";
+  nameInput.placeholder = "Folder name (e.g. Sargam)";
+  nameInput.maxLength = 40;
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "mp-remove";
+  removeBtn.textContent = "×";
+  removeBtn.title = "Remove";
+  header.appendChild(nameInput);
+  header.appendChild(removeBtn);
+  card.appendChild(header);
 
-  const dataUrl = await new Promise(resolve => {
-    const reader = new FileReader();
-    reader.onload = e => resolve(e.target.result);
-    reader.readAsDataURL(file);
-  });
+  // Slots row
+  const slotsRow = document.createElement("div");
+  slotsRow.className = "mp-slots-row";
 
-  const res = await sendMessage("EXTRACT_FACE_EMBEDDING", { imageDataUrl: dataUrl });
+  const personEntry = {
+    name: savedData?.name || "",
+    embeddings: savedData?.embeddings || new Array(MP_MAX_SLOTS).fill(null),
+    thumbnailDataUrls: savedData?.thumbnailDataUrls || new Array(MP_MAX_SLOTS).fill(null),
+    cardEl: card,
+  };
+  _mpPersons.push(personEntry);
 
-  if (!res?.ok) {
-    orgFindBtn.textContent = "🔍 Find & Move Photos";
-    updateOrgFindBtn();
-    alert("No face detected in that photo.\nPlease use a clear, front-facing portrait.");
-    return;
+  const slotHandlers = [];
+  for (let i = 0; i < MP_MAX_SLOTS; i++) {
+    const s = makePhotoSlot(personEntry, i);
+    slotHandlers.push(s);
+    // Restore saved photo if present
+    if (savedData?.thumbnailDataUrls?.[i] && savedData?.embeddings?.[i]) {
+      s.renderFilled(savedData.thumbnailDataUrls[i], null);
+    }
+    slotsRow.appendChild(s.el);
   }
 
-  // Insert into the active slot position
-  _orgEmbeddings.splice(_orgActiveSlot, 0, {
-    embedding:        res.embedding,
-    thumbnailDataUrl: res.thumbnailDataUrl,
-    quality:          res.quality || "fair",
+  // From Drive button
+  const driveBtn = document.createElement("button");
+  driveBtn.className = "mp-drive-btn";
+  driveBtn.title = "Pick a photo from your Human folder in Drive";
+  driveBtn.textContent = "📁 Drive";
+  driveBtn.addEventListener("click", () => {
+    // Target the first empty slot
+    let targetIdx = personEntry.embeddings.findIndex(e => !e);
+    if (targetIdx === -1) targetIdx = MP_MAX_SLOTS - 1; // overwrite last if all full
+    _drivePickTarget = { personEntry, slotIdx: targetIdx, renderFilled: slotHandlers[targetIdx].renderFilled };
+    openDrivePickerForMp();
   });
-  // Cap at MAX
-  if (_orgEmbeddings.length > MAX_REF_PHOTOS) _orgEmbeddings.length = MAX_REF_PHOTOS;
+  slotsRow.appendChild(driveBtn);
+  card.appendChild(slotsRow);
 
-  renderOrgPreview();
-  orgFindBtn.textContent = "🔍 Find & Move Photos";
-  updateOrgFindBtn();
+  nameInput.value = personEntry.name;
+  nameInput.addEventListener("input", () => {
+    personEntry.name = nameInput.value;
+    updateMpFindAllBtn();
+    saveMpPersons();
+  });
+  removeBtn.addEventListener("click", () => {
+    _mpPersons = _mpPersons.filter(p => p.cardEl !== card);
+    card.remove();
+    updateMpFindAllBtn();
+    saveMpPersons();
+  });
+
+  mpList.appendChild(card);
+  return card;
+}
+
+async function initMpCards() {
+  const result = await chrome.storage.local.get(MP_STORAGE_KEY);
+  const saved = result[MP_STORAGE_KEY];
+  if (saved?.length) {
+    saved.forEach(s => createPersonCard(s));
+  } else {
+    createPersonCard();
+  }
+  updateMpFindAllBtn();
+}
+
+initMpCards();
+
+mpAddBtn.addEventListener("click", () => {
+  createPersonCard();
+  saveMpPersons();
+  updateMpFindAllBtn();
 });
 
-orgNameInput.addEventListener("input", updateOrgFindBtn);
-
-function updateOrgFindBtn() {
-  orgFindBtn.disabled = !(_orgEmbeddings.length > 0 && orgNameInput.value.trim().length > 0);
-}
-
-// ── Compute centroid from all reference embeddings ─────────────────────────
-// Averaging multiple embeddings then L2-normalising creates a more unique
-// representation for this person vs family members who share similar geometry.
-function computeCentroid(embeddings) {
-  const len = embeddings[0].length;
-  const sum = new Array(len).fill(0);
-  for (const emb of embeddings) {
-    for (let i = 0; i < len; i++) sum[i] += emb[i];
+// ── Drive picker for multi-person slots ───────────────────────────────────
+function openDrivePickerForMp() {
+  drivePickerOverlay.classList.remove("hidden");
+  drivePickerSearch.value = "";
+  if (_drivePickerFiles.length) {
+    renderDriveGrid(_drivePickerFiles);
+    return;
   }
-  // L2 normalise
-  let norm = 0;
-  for (let i = 0; i < len; i++) norm += sum[i] * sum[i];
-  norm = Math.sqrt(norm);
-  return sum.map(v => v / norm);
+  loadDrivePickerFiles();
 }
 
 // ── People-tab own progress bar helpers ───────────────────────────────────────
@@ -826,85 +905,60 @@ function setOrgProgress(message, processed, total) {
   }
 }
 
-// Progress updates from background during find-person scan
+// Progress updates from background during multi-person search
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type !== "PROGRESS_UPDATE") return;
-  if (msg.operation !== "findPerson" && msg.operation !== "findPersonIndex") return;
+  if (msg.operation !== "findPerson" && msg.operation !== "findPersonIndex" && msg.operation !== "findMultiPerson") return;
   showOrgProgress();
   setOrgProgress(msg.message, msg.processed, msg.total);
 });
 
-orgFindBtn.addEventListener("click", async () => {
-  const name = orgNameInput.value.trim();
-  if (!_orgEmbeddings.length || !name) return;
+// ── Find & Organize All handler ────────────────────────────────────────────
+mpFindAllBtn.addEventListener("click", async () => {
+  const persons = _mpPersons.filter(p => p.embeddings.some(Boolean) && p.name.trim());
+  if (!persons.length) return;
 
-  const allEmbeddings = _orgEmbeddings.map(e => e.embedding);
-
-  orgFindBtn.disabled    = true;
-  orgFindBtn.textContent = "⏳ Checking index…";
+  mpFindAllBtn.disabled = true;
+  mpFindAllBtn.textContent = "⏳ Working…";
+  mpAddBtn.disabled = true;
   showOrgProgress();
   setOrgProgress("Checking face index…", 0, 1);
 
-  // ── Try index-based search first (instant) ────────────────────────────────
   const indexStatus = await sendMessage("GET_FACE_INDEX_STATUS");
   const hasIndex    = (indexStatus?.embeddingCount || 0) > 0;
 
+  const personsPayload = persons.map(p => ({
+    personName: p.name.trim(),
+    referenceEmbeddings: p.embeddings.filter(Boolean),
+    thumbnailDataUrl: p.thumbnailDataUrls.find(Boolean) || null,
+  }));
+
   let res;
   if (hasIndex) {
-    setOrgProgress(`Searching ${indexStatus.embeddingCount} indexed faces for ${name}…`, 0, 1);
-    res = await sendMessage("FIND_PERSON_FROM_INDEX", {
-      referenceEmbeddings: allEmbeddings,
-      personName: name,
-    });
-
-    // Show top scores as debug info so we can calibrate threshold
-    if (res?.topSims?.length) {
-      console.log("[FaceSearch] Top similarity scores from index:", res.topSims.map(s => s.toFixed(3)).join(", "));
-      alert(`[Debug] Top similarity scores:\n${res.topSims.map(s => s.toFixed(3)).join(", ")}\n\nMatched: ${res.matched ?? 0} photos\nModel: ${res.model ?? "unknown"}`);
-    }
-
-    // Only fall back to live scan if index truly has no data
-    if (!res?.ok) {
-      res = null;
-    }
+    setOrgProgress(`Searching ${indexStatus.embeddingCount} indexed faces…`, 0, 1);
+    res = await sendMessage("FIND_MULTIPLE_PERSONS_FROM_INDEX", { persons: personsPayload });
   }
-
-  // ── Fall back to live scan if no index ────────────────────────────────────
-  if (!res) {
-    orgFindBtn.textContent = "⏳ Scanning…";
-    setOrgProgress(`No index found — scanning all photos for ${name}… (this takes time)`, 0, 1);
-    res = await sendMessage("FIND_AND_MOVE_PERSON_PHOTOS", {
-      referenceEmbeddings: allEmbeddings,
-      personName: name,
-      refPhotoCount: _orgEmbeddings.length,
-    });
-  }
-
-  hideOrgProgress();
-  orgFindBtn.disabled    = false;
-  orgFindBtn.textContent = "🔍 Find & Move Photos";
 
   if (!res?.ok) {
-    alert(`Search failed: ${res?.error || "Unknown error"}`);
+    hideOrgProgress();
+    alert(`Search failed: ${res?.error || "No face index — run Scan Faces first."}`);
+    mpFindAllBtn.disabled = false;
+    mpFindAllBtn.textContent = "🔍 Find & Organize All";
+    mpAddBtn.disabled = false;
     return;
   }
 
-  const moved   = res.moved   ?? res.movedCount ?? 0;
-  const scanned = res.matched ?? res.scanned    ?? 0;
-  const firstThumb = _orgEmbeddings[0]?.thumbnailDataUrl || null;
+  hideOrgProgress();
+  mpFindAllBtn.disabled = false;
+  mpFindAllBtn.textContent = "🔍 Find & Organize All";
+  mpAddBtn.disabled = false;
 
-  if (res.topSims?.length) {
-    console.info(`[FaceIndex] Top-5 scores: ${res.topSims.slice(0,5).map(s=>s.toFixed(3)).join(", ")} (threshold=0.55)`);
+  // Show result row per person
+  for (const r of (res.results || [])) {
+    addOrgResultRow(r.personName, r.thumbnailDataUrl, r.moved, r.matched, `from ${indexStatus.embeddingCount} indexed faces`);
   }
 
-  addOrgResultRow(name, firstThumb, moved, scanned, hasIndex ? `from ${indexStatus.embeddingCount} indexed faces` : null);
-
-  _orgEmbeddings = [];
-  _orgActiveSlot = 0;
-  orgNameInput.value = "";
-  orgFindBtn.disabled = true;
-  orgPhotoInput.value = "";
-  renderOrgPreview();
+  updateMpFindAllBtn();
 });
 
 // ── Drive Photo Picker ─────────────────────────────────────────────────────────
@@ -992,14 +1046,30 @@ function renderDriveGrid(files) {
 async function selectDrivePhoto(file) {
   closeDrivePicker();
 
-  orgFindBtn.disabled   = true;
+  // ── Multi-person slot flow ──────────────────────────────────────────────
+  if (_drivePickTarget) {
+    const { personEntry, slotIdx, renderFilled } = _drivePickTarget;
+    _drivePickTarget = null;
+
+    const dlRes = await sendMessage("DOWNLOAD_DRIVE_IMAGE_BASE64", { fileId: file.id, mimeType: file.mimeType });
+    if (!dlRes?.ok) { alert(`Could not download "${file.name}" from Drive.\n${dlRes?.error || ""}`); return; }
+
+    const embRes = await sendMessage("EXTRACT_FACE_EMBEDDING", { imageDataUrl: dlRes.dataUrl });
+    if (!embRes?.ok) { alert("No face detected in that Drive photo.\nPlease choose a clear, front-facing portrait."); return; }
+
+    personEntry.embeddings[slotIdx] = embRes.embedding;
+    personEntry.thumbnailDataUrls[slotIdx] = embRes.thumbnailDataUrl;
+    renderFilled(embRes.thumbnailDataUrl, embRes.quality || "fair");
+    updateMpFindAllBtn();
+    saveMpPersons();
+    return;
+  }
+
+  // ── Single-person (Organise tab) flow ───────────────────────────────────
+  orgFindBtn.disabled    = true;
   orgFindBtn.textContent = "⏳ Downloading from Drive…";
 
-  // Download the full image from Drive
-  const dlRes = await sendMessage("DOWNLOAD_DRIVE_IMAGE_BASE64", {
-    fileId:   file.id,
-    mimeType: file.mimeType,
-  });
+  const dlRes = await sendMessage("DOWNLOAD_DRIVE_IMAGE_BASE64", { fileId: file.id, mimeType: file.mimeType });
 
   if (!dlRes?.ok) {
     orgFindBtn.textContent = "🔍 Find & Move Photos";
@@ -1010,7 +1080,6 @@ async function selectDrivePhoto(file) {
 
   orgFindBtn.textContent = "⏳ Detecting face…";
 
-  // Extract face embedding
   const embRes = await sendMessage("EXTRACT_FACE_EMBEDDING", { imageDataUrl: dlRes.dataUrl });
 
   orgFindBtn.textContent = "🔍 Find & Move Photos";

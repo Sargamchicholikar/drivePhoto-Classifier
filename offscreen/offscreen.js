@@ -802,11 +802,50 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         bmp.close();
 
-        await releaseRecognizer();
+        // ── Fallback: face detector couldn't find a face (side angle, profile, low light)
+        // Run ArcFace directly on a centre-square crop of the image.
+        // Quality is marked "poor" so the user sees the ~ badge, but the embedding is still usable.
         if (!bestFace) {
-          sendResponse({ ok: false, error: "No face detected. Please use a photo where your face is clearly visible." });
+          const CROP = 112;
+          const side = Math.min(bmp.width, bmp.height);
+          const sx   = Math.floor((bmp.width  - side) / 2);
+          const sy   = Math.floor((bmp.height - side) / 4); // bias toward top (face usually there)
+          const fallbackCanvas = new OffscreenCanvas(CROP, CROP);
+          fallbackCanvas.getContext("2d").drawImage(bmp, sx, sy, side, side, 0, 0, CROP, CROP);
+
+          const { data } = fallbackCanvas.getContext("2d").getImageData(0, 0, CROP, CROP);
+          const P = CROP * CROP;
+          const input = new Float32Array(3 * P);
+          for (let i = 0; i < P; i++) {
+            input[0 * P + i] = (data[i * 4]     - 127.5) / 128;
+            input[1 * P + i] = (data[i * 4 + 1] - 127.5) / 128;
+            input[2 * P + i] = (data[i * 4 + 2] - 127.5) / 128;
+          }
+
+          const recognizer = await ensureRecognizer();
+          const tensor  = new ort.Tensor("float32", input, [1, 3, CROP, CROP]);
+          const out     = await recognizer.run({ "input.1": tensor });
+          const outKey  = out.embedding ? "embedding" : Object.keys(out)[0];
+          const embedding = Array.from(out[outKey].data);
+
+          // Generate a thumbnail from the same crop
+          const THUMB = 80;
+          const thumbCanvas = new OffscreenCanvas(THUMB, THUMB);
+          thumbCanvas.getContext("2d").drawImage(bmp, sx, sy, side, side, 0, 0, THUMB, THUMB);
+          const thumbBlob = await thumbCanvas.convertToBlob({ type: "image/jpeg", quality: 0.75 });
+          const thumbnailDataUrl = await new Promise(r => {
+            const reader = new FileReader();
+            reader.onload = () => r(reader.result);
+            reader.readAsDataURL(thumbBlob);
+          });
+
+          await releaseRecognizer();
+          bmp.close();
+          sendResponse({ ok: true, embedding, thumbnailDataUrl, facesFound: 0, quality: "poor" });
           return;
         }
+
+        await releaseRecognizer();
 
         // Quality based on landmark eye distance (most reliable signal when landmarks exist)
         const lms = bestFace.landmarks;

@@ -51,6 +51,10 @@ const MAX_PROCESSED_IDS              = 50000;
 const MARGIN_THRESHOLD               = 0.20;
 const CORRECTIONS_KEY                = "photoCorrectionsV1";
 const LAST_SORT_SUMMARY_KEY          = "lastSortSummaryV1";
+const AL_EXAMPLES_KEY                = "alExamplesV1";   // active-learning training set
+const AL_PENDING_KEY                 = "alPendingV1";    // logits for current Unsure batch
+const AL_KNN_K                       = 5;                // neighbours to vote
+const AL_KNN_MIN_SIM                 = 0.97;             // cosine threshold to count as neighbour
 
 
 
@@ -89,6 +93,73 @@ async function saveCorrection(fileId, label, originalLabel = null) {
   const store = data[CORRECTIONS_KEY] || {};
   store[fileId] = { label, originalLabel, timestamp: Date.now() };
   await chrome.storage.local.set({ [CORRECTIONS_KEY]: store });
+}
+
+// ── Active Learning: k-NN classifier in logit space ───────────────────────────
+// Each training example: { logits: number[4], label: string }
+// Stored examples grow every time the user corrects an Unsure photo.
+// At sort time, new Unsure candidates are checked against stored examples.
+// If k nearest neighbours majority-agree on a label, we use it instead of Unsure.
+
+async function loadALExamples() {
+  const data = await chrome.storage.local.get(AL_EXAMPLES_KEY);
+  return data[AL_EXAMPLES_KEY] || [];
+}
+
+async function saveALExample(logits, label) {
+  const data     = await chrome.storage.local.get(AL_EXAMPLES_KEY);
+  const examples = data[AL_EXAMPLES_KEY] || [];
+  examples.push({ logits, label, timestamp: Date.now() });
+  // Keep at most 2000 examples (oldest drop off)
+  if (examples.length > 2000) examples.splice(0, examples.length - 2000);
+  await chrome.storage.local.set({ [AL_EXAMPLES_KEY]: examples });
+}
+
+async function storePendingLogits(fileId, logits) {
+  const data    = await chrome.storage.local.get(AL_PENDING_KEY);
+  const pending = data[AL_PENDING_KEY] || {};
+  pending[fileId] = logits;
+  await chrome.storage.local.set({ [AL_PENDING_KEY]: pending });
+}
+
+async function popPendingLogits(fileId) {
+  const data    = await chrome.storage.local.get(AL_PENDING_KEY);
+  const pending = data[AL_PENDING_KEY] || {};
+  const logits  = pending[fileId] || null;
+  if (logits) {
+    delete pending[fileId];
+    await chrome.storage.local.set({ [AL_PENDING_KEY]: pending });
+  }
+  return logits;
+}
+
+function cosineSim4(a, b) {
+  let dot = 0, ma = 0, mb = 0;
+  for (let i = 0; i < 4; i++) { dot += a[i]*b[i]; ma += a[i]*a[i]; mb += b[i]*b[i]; }
+  const denom = Math.sqrt(ma) * Math.sqrt(mb);
+  return denom > 0 ? dot / denom : 0;
+}
+
+// Returns { label, confidence, neighbours } or null if no confident prediction
+function knnPredict(logits, examples) {
+  if (!examples.length || !logits?.length) return null;
+
+  // Find top-k neighbours by cosine similarity
+  const scored = examples.map(ex => ({ label: ex.label, sim: cosineSim4(logits, ex.logits) }));
+  scored.sort((a, b) => b.sim - a.sim);
+  const neighbours = scored.slice(0, AL_KNN_K).filter(n => n.sim >= AL_KNN_MIN_SIM);
+
+  if (!neighbours.length) return null;
+
+  // Majority vote
+  const votes = {};
+  for (const n of neighbours) votes[n.label] = (votes[n.label] || 0) + 1;
+  const winner = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  const confidence = winner[1] / neighbours.length;
+
+  // Only act if majority agree (>50%)
+  if (confidence <= 0.5) return null;
+  return { label: winner[0], confidence, neighbours: neighbours.length };
 }
 
 async function ensureOffscreenDocument(forceRecreate = false) {
@@ -313,6 +384,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const uncertainFiles = [];
         const processedIdSet = await loadProcessedIdSet();
         const corrections    = await loadCorrections();
+        const alExamples     = await loadALExamples();   // k-NN training set
         // Load adaptive thresholds once — computed from all past user corrections.
         // Classes that have been corrected more often require higher confidence
         // before committing, so borderline photos go to Unsure for human review.
@@ -359,7 +431,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               if (processedIdSet.has(file.id)) { skippedAlreadyProcessed += 1; continue; }
 
               const corr = corrections[file.id];
-              const eff  = corr ? { ...file, category: corr.label, confidence: 1.0, corrected: true } : file;
+              let eff = corr ? { ...file, category: corr.label, confidence: 1.0, corrected: true } : file;
+
+              // ── Active Learning: k-NN override before sending to Unsure ──────
+              if (!eff.corrected && eff.rawLogits?.length && alExamples.length) {
+                const pred = knnPredict(eff.rawLogits, alExamples);
+                if (pred) {
+                  eff = { ...eff, category: pred.label, confidence: pred.confidence, alOverride: true };
+                }
+              }
+
               const targetFolder = resolveTargetFolder(eff, folders, adaptiveThresholds);
               const fileBytes = Number(eff.size || 0);
 
@@ -372,6 +453,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
               if (targetFolder.label.endsWith("/Unsure") && !eff.corrected && !String(eff.mimeType || "").startsWith("video/")) {
                 uncertainFiles.push({ id: file.id, name: file.name, category: eff.category || "unknown", confidence: Math.round((eff.confidence || 0) * 100) });
+                // Store logits so APPLY_CORRECTION can save them as a training example
+                if (eff.rawLogits?.length) storePendingLogits(file.id, eff.rawLogits);
               }
 
               try {
@@ -489,15 +572,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const corrections    = await loadCorrections();
         const adaptiveThresholds = await getAdaptiveThresholds();
 
-        // Collect all images from the five re-sortable sub-folders + every
-        // person subfolder under People/ (People/Sargam/, People/Mom/, etc.)
+        // Collect all images from all subfolders under Smart Photo Organizer root
+        // (the 5 standard folders, all People subfolders, plus any custom folders)
         const peopleRoot     = await getOrCreateFolder(cachedToken, "People", folders.root.id);
         const personFolders  = await listSubfolders(cachedToken, peopleRoot.id);
+        const rootSubfolders = await listSubfolders(cachedToken, folders.root.id);
+
+        // Known folder IDs to avoid duplicates
+        const knownIds = new Set([
+          folders.human.id, folders.group.id, folders.animals.id,
+          folders.junk.id, folders.unsure.id, folders.videos.id,
+          peopleRoot.id,
+        ]);
+        const extraFolders = rootSubfolders.filter(f => !knownIds.has(f.id));
 
         const RESORT_FOLDERS = [
           folders.human, folders.group, folders.animals,
           folders.junk,  folders.unsure,
           ...personFolders,
+          ...extraFolders,
         ];
 
         let allFiles = [];
@@ -616,6 +709,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await ensureFreshToken();
         await saveCorrection(fileId, correctedLabel, originalLabel);
 
+        // ── Active Learning: save logits + label as a training example ─────────
+        const pendingLogits = await popPendingLogits(fileId);
+        if (pendingLogits) {
+          await saveALExample(pendingLogits, correctedLabel);
+        }
+
         const folders  = await ensureFolderTree(cachedToken);
         const labelMap = { human: folders.human, group: folders.group, animals: folders.animals, junk: folders.junk };
         const targetFolder = labelMap[correctedLabel] ?? folders.unsure;
@@ -636,6 +735,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     if (msg.type === "GET_MODEL_INFO") {
       const corrections = await loadCorrections();
+      const alExamples  = await loadALExamples();
       const { lastSortTimestamp } = await chrome.storage.local.get("lastSortTimestamp");
       const stored = await chrome.storage.local.get(LAST_SORT_SUMMARY_KEY);
       const lastSortSummary = stored[LAST_SORT_SUMMARY_KEY] || null;
@@ -643,6 +743,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         ok: true,
         runtimeVersion: OFFSCREEN_RUNTIME_VERSION,
         correctionsCount: Object.keys(corrections).length,
+        alExamplesCount: alExamples.length,
         lastSortTimestamp: lastSortTimestamp || null,
         lastSortSummary,
       });
@@ -727,7 +828,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // Track which folder each photo came from so we can store it in faceDB
         const foldersToScan = [
           { id: folders.human.id, name: "Human" },
-          { id: folders.group.id, name: "Group" },
         ];
         const allPhotos = []; // each entry: { ...fileFields, sourceFolderId, sourceFolderName }
 
@@ -999,7 +1099,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
 
-    // ── List recent Drive images for the reference photo picker ───────────────
+    // ── List Drive images for the reference photo picker (all pages) ──────────
     if (msg.type === "LIST_DRIVE_IMAGES_FOR_PICKER") {
       try {
         await ensureFreshToken();
@@ -1008,19 +1108,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const q = humanId
           ? `'${humanId}' in parents and mimeType contains 'image/' and trashed=false`
           : `mimeType contains 'image/' and trashed=false`;
-        const url = new URL("https://www.googleapis.com/drive/v3/files");
-        url.searchParams.set("q", q);
-        url.searchParams.set("orderBy", "modifiedTime desc");
-        url.searchParams.set("pageSize", "100");
-        url.searchParams.set("fields", "files(id,name,thumbnailLink,mimeType,modifiedTime)");
-        url.searchParams.set("supportsAllDrives", "true");
-        url.searchParams.set("includeItemsFromAllDrives", "true");
-        const resp = await fetch(url.toString(), {
-          headers: { Authorization: `Bearer ${cachedToken}` },
-        });
-        if (!resp.ok) throw new Error(`Drive API ${resp.status}`);
-        const data = await resp.json();
-        sendResponse({ ok: true, files: data.files || [] });
+
+        let allFiles = [];
+        let pageToken = "";
+        do {
+          const url = new URL("https://www.googleapis.com/drive/v3/files");
+          url.searchParams.set("q", q);
+          url.searchParams.set("orderBy", "modifiedTime desc");
+          url.searchParams.set("pageSize", "200");
+          url.searchParams.set("fields", "nextPageToken,files(id,name,thumbnailLink,mimeType,modifiedTime)");
+          url.searchParams.set("supportsAllDrives", "true");
+          url.searchParams.set("includeItemsFromAllDrives", "true");
+          if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+          const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${cachedToken}` } });
+          if (!resp.ok) throw new Error(`Drive API ${resp.status}`);
+          const data = await resp.json();
+          allFiles = allFiles.concat(data.files || []);
+          pageToken = data.nextPageToken || "";
+        } while (pageToken);
+
+        sendResponse({ ok: true, files: allFiles });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
       }
@@ -1395,7 +1503,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // compare the reference embedding against all stored embeddings in memory.
     // 10,000 embeddings compared in < 100 ms.
     if (msg.type === "FIND_PERSON_FROM_INDEX") {
-      const { referenceEmbeddings, personName, threshold = 0.65 } = msg;
+      const { referenceEmbeddings, personName, threshold = 0.60 } = msg;
       if (!referenceEmbeddings?.length || !personName) {
         sendResponse({ ok: false, error: "Reference photo and name required." });
         return;
@@ -1470,6 +1578,95 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           model: modelUsed,
           threshold,
         });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
+
+    // ── Multi-person index search — one pass, winner-takes-all ────────────────
+    // Each indexed face is assigned to whichever person scores highest above
+    // the threshold. A photo is moved to only ONE folder (the best match).
+    if (msg.type === "FIND_MULTIPLE_PERSONS_FROM_INDEX") {
+      const { persons, threshold = 0.45 } = msg;
+      if (!persons?.length) { sendResponse({ ok: false, error: "No persons provided." }); return; }
+      try {
+        await ensureFreshToken();
+        const allEmbeddings = await faceDB.getAllEmbeddings();
+        if (!allEmbeddings.length) { sendResponse({ ok: false, error: "NO_INDEX" }); return; }
+
+        // Photos whose source folder is the Group Photos folder are always excluded
+        const folders = await ensureFolderTree(cachedToken);
+        const groupFolderId = folders.group?.id || null;
+
+        emitProgress({ operation: "findMultiPerson", stage: "match", processed: 0, total: allEmbeddings.length, message: `Searching ${allEmbeddings.length} faces for ${persons.length} people…` });
+
+        // Winner-takes-all: track best and second-best score per photo
+        // photoId → { personIdx, score, secondScore }
+        const photoWinner = new Map();
+        for (let e = 0; e < allEmbeddings.length; e++) {
+          const emb = allEmbeddings[e];
+          if (!emb.embedding?.length) continue;
+          if (groupFolderId && emb.sourceFolderId === groupFolderId) continue;
+
+          const scores = persons.map(person =>
+            Math.max(...person.referenceEmbeddings.map(ref => cosineSim(emb.embedding, ref)))
+          );
+
+          let bestIdx = -1, bestScore = threshold, secondScore = 0;
+          for (let p = 0; p < scores.length; p++) {
+            if (scores[p] > bestScore) { secondScore = bestScore; bestScore = scores[p]; bestIdx = p; }
+            else if (scores[p] > secondScore) secondScore = scores[p];
+          }
+
+          if (bestIdx >= 0) {
+            const prev = photoWinner.get(emb.photoId);
+            const newSecond = Math.max(secondScore, prev?.secondScore || 0);
+            if (!prev || bestScore > prev.score) {
+              photoWinner.set(emb.photoId, { personIdx: bestIdx, score: bestScore, secondScore: newSecond });
+            } else {
+              photoWinner.set(emb.photoId, { ...prev, secondScore: newSecond });
+            }
+          }
+
+          if (e % 500 === 0) emitProgress({ operation: "findMultiPerson", stage: "match", processed: e, total: allEmbeddings.length, message: `Matching faces… ${e}/${allEmbeddings.length}` });
+        }
+
+        // Assign only if:
+        // 1. The winner clearly beats the second person by at least MIN_MARGIN
+        //    (avoids coin-flip assignments between similar family members)
+        // 2. The second person isn't suspiciously close (group photo ratio check)
+        const MIN_MARGIN  = 0.10; // winner must beat 2nd by at least 0.10
+        const GROUP_RATIO = 0.92; // if 2nd/winner >= 0.92, likely a real group photo
+        const personPhotoIds = persons.map(() => []);
+        for (const [photoId, { personIdx, score, secondScore }] of photoWinner) {
+          if (secondScore / score >= GROUP_RATIO) continue;       // group photo → skip
+          if (score - secondScore < MIN_MARGIN) continue;         // too close to call → skip
+          personPhotoIds[personIdx].push(photoId);
+        }
+
+        // Create folders and move files
+        const root       = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
+        const peopleRoot = await getOrCreateFolder(cachedToken, "People", root.id);
+
+        const results = [];
+        let totalMoved = 0;
+        for (let p = 0; p < persons.length; p++) {
+          const { personName, thumbnailDataUrl } = persons[p];
+          const ids = personPhotoIds[p];
+          if (!ids.length) { results.push({ personName, matched: 0, moved: 0, thumbnailDataUrl }); continue; }
+
+          const folder = await getOrCreateFolder(cachedToken, personName, peopleRoot.id);
+          let moved = 0;
+          for (let i = 0; i < ids.length; i++) {
+            try { await moveFileToFolder(cachedToken, ids[i], folder.id); moved++; } catch (_) {}
+            emitProgress({ operation: "findMultiPerson", stage: "move", processed: totalMoved + i + 1, total: photoWinner.size, message: `Moving photos… ${personName} ${i + 1}/${ids.length}` });
+          }
+          totalMoved += moved;
+          results.push({ personName, matched: ids.length, moved, folderId: folder.id, thumbnailDataUrl });
+        }
+
+        sendResponse({ ok: true, results, totalIndexed: allEmbeddings.length });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
       }
