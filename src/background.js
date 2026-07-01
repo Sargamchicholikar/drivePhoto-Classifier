@@ -575,8 +575,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
               if (targetFolder.label.endsWith("/Unsure") && !eff.corrected && !String(eff.mimeType || "").startsWith("video/")) {
                 uncertainFiles.push({ id: file.id, name: file.name, category: eff.category || "unknown", confidence: Math.round((eff.confidence || 0) * 100) });
-                // Store logits so APPLY_CORRECTION can save them as a training example
                 if (eff.rawLogits?.length) storePendingLogits(file.id, eff.rawLogits);
+              }
+              // Store logits for Junk photos too so Junk Review corrections become AL training examples
+              if (targetFolder.label.endsWith("/Junk") && !eff.corrected && eff.rawLogits?.length) {
+                storePendingLogits(file.id, eff.rawLogits);
               }
 
               try {
@@ -928,6 +931,34 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }));
 
         sendResponse({ ok: true, files, total: allFiles.length, folderId: unsureFolderId });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+      return;
+    }
+
+    // ── Fetch images from the Junk folder for manual review ──────────────────
+    if (msg.type === "GET_JUNK_FILES") {
+      try {
+        await ensureFreshToken();
+        const folders = await ensureFolderTree(cachedToken);
+        const allFiles = [];
+        let pt = "";
+        do {
+          const page = await listImageFilesInFolderPage(
+            cachedToken, folders.junk.id,
+            { pageToken: pt, pageSize: 100, includeVideos: false }
+          );
+          allFiles.push(...(page.files || []));
+          pt = page.nextPageToken || "";
+          chrome.runtime.sendMessage({ type: "JUNK_FILES_PROGRESS", loaded: allFiles.length }).catch(() => {});
+        } while (pt);
+        const files = allFiles.map(f => ({
+          id:           f.id,
+          name:         f.name,
+          thumbnailUrl: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+$/, "=s400") : null,
+        }));
+        sendResponse({ ok: true, files, total: allFiles.length });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }

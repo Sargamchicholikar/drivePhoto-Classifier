@@ -215,6 +215,7 @@ function showSignedIn() {
   signOutBtn.classList.remove("hidden");
   sortBtn.disabled      = false;
   resortBtn.disabled    = false;
+  reviewJunkBtn.disabled = false;
   setStatus("Signed in. Ready to sort.", "done");
 }
 
@@ -222,8 +223,9 @@ function showSignedOut() {
   mainView.classList.add("hidden");
   authView.classList.remove("hidden");
   signOutBtn.classList.add("hidden");
-  sortBtn.disabled   = true;
-  resortBtn.disabled = true;
+  sortBtn.disabled       = true;
+  resortBtn.disabled     = true;
+  reviewJunkBtn.disabled = true;
 }
 
 // ── Sign in ───────────────────────────────────────────────────────────────────
@@ -436,10 +438,12 @@ const reviewImgPlaceholder = document.getElementById("reviewImgPlaceholder");
 const reviewPhotoName   = document.getElementById("reviewPhotoName");
 const reviewCloseBtn    = document.getElementById("reviewCloseBtn");
 const reviewSkipBtn     = document.getElementById("reviewSkipBtn");
+const reviewJunkBtn     = document.getElementById("reviewJunkBtn");
 
 let _reviewQueue    = [];
 let _reviewIndex    = 0;
 let _correctedCount = 0;
+let _reviewMode     = "unsure"; // "unsure" | "junk"
 
 // Called automatically after sort — fetches ALL Unsure folder images.
 // For large folders this may take several seconds (Drive paginates 100 at a time),
@@ -486,12 +490,14 @@ function openReviewModal() {
   reviewPrompt.classList.add("hidden");
   _reviewIndex    = 0;
   _correctedCount = 0;
+  setReviewMode("unsure");
   showReviewCard();
   reviewOverlay.classList.remove("hidden");
 }
 
 function closeReviewModal() {
   reviewOverlay.classList.add("hidden");
+  setReviewMode("unsure"); // always reset to unsure mode on close
   if (_correctedCount > 0) {
     setStatus(
       `✅ ${_correctedCount} photo${_correctedCount !== 1 ? "s" : ""} sorted — AI will remember your choices on the next sort.`,
@@ -539,26 +545,86 @@ function advanceReview() {
   }
 }
 
-reviewOverlay.addEventListener("click", async (e) => {
-  const btn = e.target.closest(".review-cat-btn");
-  if (!btn) return;
-  const file = _reviewQueue[_reviewIndex];
-  if (!file) return;
-
-  // Disable buttons during async operation
-  reviewOverlay.querySelectorAll(".review-cat-btn").forEach(b => b.disabled = true);
-  const res = await sendMessage("APPLY_CORRECTION", { fileId: file.id, correctedLabel: btn.dataset.cat });
-  reviewOverlay.querySelectorAll(".review-cat-btn").forEach(b => b.disabled = false);
-
-  _correctedCount++;
-  advanceReview();
-});
 
 
 reviewSkipBtn    .addEventListener("click", () => advanceReview());
 reviewCloseBtn   .addEventListener("click", () => closeReviewModal());
 reviewPromptBtn  .addEventListener("click", () => openReviewModal());
 reviewPromptClose.addEventListener("click", () => reviewPrompt.classList.add("hidden"));
+
+// ── Junk Review ───────────────────────────────────────────────────────────────
+function setReviewMode(mode) {
+  _reviewMode = mode;
+  const junkBtn   = reviewOverlay.querySelector(".review-cat-btn[data-cat='junk']");
+  const skipBtn   = reviewSkipBtn;
+  if (mode === "junk") {
+    // In junk mode: "Junk" button becomes "Skip — keep in Junk" and stores correction
+    if (junkBtn) {
+      junkBtn.querySelector(".rcb-emoji").textContent = "⏭️";
+      junkBtn.querySelector(".rcb-label").textContent = "Skip";
+    }
+    skipBtn.textContent = "Skip all remaining →";
+    reviewOverlay.querySelector(".review-card-title").textContent = "🗑️ Junk Review";
+  } else {
+    if (junkBtn) {
+      junkBtn.querySelector(".rcb-emoji").textContent = "🗑️";
+      junkBtn.querySelector(".rcb-label").textContent = "Junk";
+    }
+    skipBtn.textContent = "Skip this photo →";
+    reviewOverlay.querySelector(".review-card-title").textContent = "📂 Unsure Review";
+  }
+}
+
+async function openJunkReview() {
+  reviewJunkBtn.disabled   = true;
+  reviewJunkBtn.textContent = "⏳ Loading…";
+
+  // Listen for incremental progress while paginating
+  const progressListener = (msg) => {
+    if (msg?.type === "JUNK_FILES_PROGRESS") {
+      reviewJunkBtn.textContent = `⏳ Loading ${msg.loaded}…`;
+    }
+  };
+  chrome.runtime.onMessage.addListener(progressListener);
+
+  const res = await sendMessage("GET_JUNK_FILES");
+  chrome.runtime.onMessage.removeListener(progressListener);
+
+  reviewJunkBtn.disabled   = false;
+  reviewJunkBtn.textContent = "🗑️ Review Junk";
+
+  if (!res?.ok || !res.files?.length) {
+    setStatus("No photos found in Junk folder.", "idle");
+    return;
+  }
+
+  _reviewQueue    = res.files;
+  _reviewIndex    = 0;
+  _correctedCount = 0;
+  setReviewMode("junk");
+  showReviewCard();
+  reviewOverlay.classList.remove("hidden");
+}
+
+reviewJunkBtn.addEventListener("click", openJunkReview);
+
+// Override category button handler to support junk mode
+reviewOverlay.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".review-cat-btn");
+  if (!btn) return;
+  const file = _reviewQueue[_reviewIndex];
+  if (!file) return;
+
+  reviewOverlay.querySelectorAll(".review-cat-btn").forEach(b => b.disabled = true);
+
+  const cat = btn.dataset.cat;
+  // In junk mode "junk" = skip but still store as AL training example
+  await sendMessage("APPLY_CORRECTION", { fileId: file.id, correctedLabel: cat });
+
+  reviewOverlay.querySelectorAll(".review-cat-btn").forEach(b => b.disabled = false);
+  if (cat !== "junk" || _reviewMode === "unsure") _correctedCount++;
+  advanceReview();
+}, { capture: false });
 
 // ══════════════════════════════════════════════════════════════════════════════
 // PEOPLE SECTION
