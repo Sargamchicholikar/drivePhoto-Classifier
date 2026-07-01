@@ -1759,13 +1759,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const allEmbeddings = await faceDB.getAllEmbeddings();
         if (!allEmbeddings.length) { sendResponse({ ok: false, error: "NO_INDEX" }); return; }
 
-        // Exclude Group folder + all People subfolders (already organised photos)
+        // Skip photos already organised in previous runs (tracked by photoId)
         const folders = await ensureFolderTree(cachedToken);
         const groupFolderId = folders.group?.id || null;
-        const root2      = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
-        const peopleRoot2 = await getOrCreateFolder(cachedToken, "People", root2.id);
-        const peopleSubs = await listSubfolders(cachedToken, peopleRoot2.id);
-        const excludeIds = new Set([groupFolderId, ...peopleSubs.map(f => f.id)].filter(Boolean));
+        const { personOrganisedIds = [] } = await chrome.storage.local.get("personOrganisedIds");
+        const organisedSet = new Set(personOrganisedIds);
 
         emitProgress({ operation: "findMultiPerson", stage: "match", processed: 0, total: allEmbeddings.length, message: `Searching ${allEmbeddings.length} faces for ${persons.length} people…` });
 
@@ -1775,7 +1773,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         for (let e = 0; e < allEmbeddings.length; e++) {
           const emb = allEmbeddings[e];
           if (!emb.embedding?.length) continue;
-          if (excludeIds.has(emb.sourceFolderId)) continue;
+          if (groupFolderId && emb.sourceFolderId === groupFolderId) continue;
+          if (organisedSet.has(emb.photoId)) continue;
 
           const scores = persons.map(person =>
             Math.max(...person.referenceEmbeddings.map(ref => cosineSim(emb.embedding, ref)))
@@ -1827,12 +1826,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const folder = await getOrCreateFolder(cachedToken, personName, peopleRoot.id);
           let moved = 0;
           for (let i = 0; i < ids.length; i++) {
-            try { await moveFileToFolder(cachedToken, ids[i], folder.id); moved++; } catch (_) {}
+            try { await moveFileToFolder(cachedToken, ids[i], folder.id); moved++; organisedSet.add(ids[i]); } catch (_) {}
             emitProgress({ operation: "findMultiPerson", stage: "move", processed: totalMoved + i + 1, total: photoWinner.size, message: `Moving photos… ${personName} ${i + 1}/${ids.length}` });
           }
           totalMoved += moved;
           results.push({ personName, matched: ids.length, moved, folderId: folder.id, thumbnailDataUrl });
         }
+
+        // Persist organised photo IDs so next run skips them
+        const trimmed = [...organisedSet].slice(-50000);
+        await chrome.storage.local.set({ personOrganisedIds: trimmed });
 
         sendResponse({ ok: true, results, totalIndexed: allEmbeddings.length });
       } catch (err) {
