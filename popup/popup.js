@@ -1040,7 +1040,7 @@ mpFindAllBtn.addEventListener("click", async () => {
 
   // Show result row per person
   for (const r of (res.results || [])) {
-    addOrgResultRow(r.personName, r.thumbnailDataUrl, r.moved, r.matched, `from ${indexStatus.embeddingCount} indexed faces`);
+    addOrgResultRow(r.personName, r.thumbnailDataUrl, r.moved, r.alreadyCorrect || 0, res.totalIndexed || 0);
   }
 
   updateMpFindAllBtn();
@@ -1187,9 +1187,10 @@ async function selectDrivePhoto(file) {
 }
 
 // ── Result row ────────────────────────────────────────────────────────────────
-function addOrgResultRow(name, thumbnailUrl, matched, scanned, indexHint = null) {
+function addOrgResultRow(name, thumbnailUrl, moved, alreadyCorrect, totalIndexed) {
   orgResults.classList.remove("hidden");
 
+  const total = moved + alreadyCorrect;
   const row = document.createElement("div");
   row.className = "org-result-row";
 
@@ -1205,21 +1206,23 @@ function addOrgResultRow(name, thumbnailUrl, matched, scanned, indexHint = null)
     row.appendChild(ph);
   }
 
-  const meta = indexHint
-    ? `Found ${scanned} matches ${indexHint} · moved ${matched}`
-    : `Scanned ${scanned} · moved ${matched}`;
+  const metaParts = [];
+  metaParts.push(`Found ${total} matches from ${totalIndexed} indexed faces`);
+  if (moved > 0)          metaParts.push(`${moved} new`);
+  if (alreadyCorrect > 0) metaParts.push(`${alreadyCorrect} already organised`);
+  if (moved === 0 && alreadyCorrect === 0) metaParts.push("no matches");
 
   const info = document.createElement("div");
   info.className = "org-result-info";
   info.innerHTML = `
     <div class="org-result-name">${name}</div>
-    <div class="org-result-meta">${meta}</div>
+    <div class="org-result-meta">${metaParts.join(' · ')}</div>
   `;
   row.appendChild(info);
 
   const badge = document.createElement("span");
-  badge.className = "org-result-badge";
-  badge.textContent = `${matched} moved`;
+  badge.className = `org-result-badge${moved === 0 ? " org-result-badge--none" : ""}`;
+  badge.textContent = moved > 0 ? `${moved} new` : "no new";
   row.appendChild(badge);
 
   orgResults.insertBefore(row, orgResults.firstChild);

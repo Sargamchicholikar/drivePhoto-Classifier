@@ -882,6 +882,9 @@ button { cursor: pointer; font-family: inherit; border: none; outline: none; bac
   background: #15803d; color: #fff;
   border-radius: 12px; padding: 2px 7px;
 }
+.org-result-badge--none {
+  background: #9ca3af;
+}
 .org-unsure-note { color: #b45309; font-weight: 600; }
 .org-drive-btn { color: #0f7b4d; }
 .org-drive-btn:hover { background: #dcfce7; }

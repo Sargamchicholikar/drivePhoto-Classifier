@@ -978,9 +978,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         const folders = await ensureFolderTree(cachedToken);
 
-        // Track which folder each photo came from so we can store it in faceDB
+        // Scan Human + all People subfolders so already-organised photos stay in index
+        const scanPeopleRoot = await getOrCreateFolder(cachedToken, "People", folders.root.id);
+        const scanPeopleSubs = await listSubfolders(cachedToken, scanPeopleRoot.id);
         const foldersToScan = [
           { id: folders.human.id, name: "Human" },
+          ...scanPeopleSubs.map(f => ({ id: f.id, name: `People/${f.name}` })),
         ];
         const allPhotos = []; // each entry: { ...fileFields, sourceFolderId, sourceFolderName }
 
@@ -1351,10 +1354,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         const folders = await ensureFolderTree(cachedToken);
 
-        // Scan Human only — these are already confirmed solo-person photos,
-        // so face detection is most likely to succeed and match correctly.
+        // Scan Human + People subfolders so organised photos stay in index
+        const aiPeopleRoot = await getOrCreateFolder(cachedToken, "People", folders.root.id);
+        const aiPeopleSubs = await listSubfolders(cachedToken, aiPeopleRoot.id);
         const foldersToScan = [
           { id: folders.human.id, name: "Human" },
+          ...aiPeopleSubs.map(f => ({ id: f.id, name: `People/${f.name}` })),
         ];
 
         // Collect all photos from those three folders
@@ -1759,11 +1764,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const allEmbeddings = await faceDB.getAllEmbeddings();
         if (!allEmbeddings.length) { sendResponse({ ok: false, error: "NO_INDEX" }); return; }
 
-        // Skip photos already organised in previous runs (tracked by photoId)
         const folders = await ensureFolderTree(cachedToken);
         const groupFolderId = folders.group?.id || null;
-        const { personOrganisedIds = [] } = await chrome.storage.local.get("personOrganisedIds");
-        const organisedSet = new Set(personOrganisedIds);
+
+        // Build a map of photoId → current sourceFolderId for re-evaluation
+        const photoSourceMap = new Map();
+        for (const emb of allEmbeddings) {
+          if (emb.photoId && emb.sourceFolderId) photoSourceMap.set(emb.photoId, emb.sourceFolderId);
+        }
+
+        // Get People subfolder IDs to detect already-organised photos
+        const matchPeopleRoot = await getOrCreateFolder(cachedToken, "People", folders.root.id);
+        const matchPeopleSubs = await listSubfolders(cachedToken, matchPeopleRoot.id);
+        const peopleFolderIds = new Set(matchPeopleSubs.map(f => f.id));
 
         emitProgress({ operation: "findMultiPerson", stage: "match", processed: 0, total: allEmbeddings.length, message: `Searching ${allEmbeddings.length} faces for ${persons.length} people…` });
 
@@ -1774,7 +1787,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const emb = allEmbeddings[e];
           if (!emb.embedding?.length) continue;
           if (groupFolderId && emb.sourceFolderId === groupFolderId) continue;
-          if (organisedSet.has(emb.photoId)) continue;
 
           const scores = persons.map(person =>
             Math.max(...person.referenceEmbeddings.map(ref => cosineSim(emb.embedding, ref)))
@@ -1816,28 +1828,37 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const root       = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
         const peopleRoot = await getOrCreateFolder(cachedToken, "People", root.id);
 
+        // Photos that matched nobody but were in a People folder → move back to Human
+        const matchedPhotoIds = new Set(personPhotoIds.flat());
+        const noMatchPhotoIds = [...photoSourceMap.keys()].filter(id =>
+          !matchedPhotoIds.has(id) && peopleFolderIds.has(photoSourceMap.get(id))
+        );
+        for (const id of noMatchPhotoIds) {
+          try { await moveFileToFolder(cachedToken, id, folders.human.id); } catch (_) {}
+        }
+
         const results = [];
         let totalMoved = 0;
         for (let p = 0; p < persons.length; p++) {
           const { personName, thumbnailDataUrl } = persons[p];
           const ids = personPhotoIds[p];
-          if (!ids.length) { results.push({ personName, matched: 0, moved: 0, thumbnailDataUrl }); continue; }
+          if (!ids.length) { results.push({ personName, matched: 0, moved: 0, alreadyCorrect: 0, thumbnailDataUrl }); continue; }
 
           const folder = await getOrCreateFolder(cachedToken, personName, peopleRoot.id);
-          let moved = 0;
+          let moved = 0, alreadyCorrect = 0;
           for (let i = 0; i < ids.length; i++) {
-            try { await moveFileToFolder(cachedToken, ids[i], folder.id); moved++; organisedSet.add(ids[i]); } catch (_) {}
+            try {
+              const res = await moveFileToFolder(cachedToken, ids[i], folder.id);
+              if (res?.skipped) alreadyCorrect++;
+              else moved++;
+            } catch (_) {}
             emitProgress({ operation: "findMultiPerson", stage: "move", processed: totalMoved + i + 1, total: photoWinner.size, message: `Moving photos… ${personName} ${i + 1}/${ids.length}` });
           }
           totalMoved += moved;
-          results.push({ personName, matched: ids.length, moved, folderId: folder.id, thumbnailDataUrl });
+          results.push({ personName, matched: ids.length, moved, alreadyCorrect, folderId: folder.id, thumbnailDataUrl });
         }
 
-        // Persist organised photo IDs so next run skips them
-        const trimmed = [...organisedSet].slice(-50000);
-        await chrome.storage.local.set({ personOrganisedIds: trimmed });
-
-        sendResponse({ ok: true, results, totalIndexed: allEmbeddings.length });
+        sendResponse({ ok: true, results, totalIndexed: allEmbeddings.length, noMatchReturned: noMatchPhotoIds.length });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
       }
