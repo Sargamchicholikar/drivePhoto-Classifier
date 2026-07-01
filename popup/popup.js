@@ -721,7 +721,12 @@ const MP_STORAGE_KEY = "mpSavedPersonsV3";
 function saveMpPersons() {
   const toSave = _mpPersons
     .filter(p => p.name.trim() || p.embeddings.some(Boolean))
-    .map(p => ({ name: p.name, embeddings: p.embeddings, thumbnailDataUrls: p.thumbnailDataUrls }));
+    .map(p => ({
+      name: p.name,
+      embeddings: p.embeddings,
+      thumbnailDataUrls: p.thumbnailDataUrls,
+      embeddingHistory: p.embeddingHistory || [],
+    }));
   chrome.storage.local.set({ [MP_STORAGE_KEY]: toSave });
 }
 
@@ -805,6 +810,11 @@ function makePhotoSlot(personEntry, slotIdx) {
     }
     personEntry.embeddings[slotIdx] = res.embedding;
     personEntry.thumbnailDataUrls[slotIdx] = res.thumbnailDataUrl;
+    // Accumulate in history so changing this slot later doesn't lose this embedding
+    if (!personEntry.embeddingHistory) personEntry.embeddingHistory = [];
+    personEntry.embeddingHistory.push(res.embedding);
+    if (personEntry.embeddingHistory.length > 50) personEntry.embeddingHistory.splice(0, personEntry.embeddingHistory.length - 50);
+    personEntry._updateHistoryLabel?.();
     renderFilled(res.thumbnailDataUrl, res.quality || "fair");
     updateMpFindAllBtn();
     saveMpPersons();
@@ -843,6 +853,10 @@ function makePhotoSlot(personEntry, slotIdx) {
 
       personEntry.embeddings[slotIdx] = embRes.embedding;
       personEntry.thumbnailDataUrls[slotIdx] = embRes.thumbnailDataUrl;
+      if (!personEntry.embeddingHistory) personEntry.embeddingHistory = [];
+      personEntry.embeddingHistory.push(embRes.embedding);
+      if (personEntry.embeddingHistory.length > 50) personEntry.embeddingHistory.splice(0, personEntry.embeddingHistory.length - 50);
+      personEntry._updateHistoryLabel?.();
       renderFilled(embRes.thumbnailDataUrl, embRes.quality || "fair");
       updateMpFindAllBtn();
       saveMpPersons();
@@ -887,6 +901,7 @@ function createPersonCard(savedData) {
     name: savedData?.name || "",
     embeddings: savedData?.embeddings || new Array(MP_MAX_SLOTS).fill(null),
     thumbnailDataUrls: savedData?.thumbnailDataUrls || new Array(MP_MAX_SLOTS).fill(null),
+    embeddingHistory: savedData?.embeddingHistory || [],
     cardEl: card,
   };
   _mpPersons.push(personEntry);
@@ -916,6 +931,39 @@ function createPersonCard(savedData) {
   });
   slotsRow.appendChild(driveBtn);
   card.appendChild(slotsRow);
+
+  // History count row
+  const historyRow = document.createElement("div");
+  historyRow.className = "mp-history-row";
+  const historyLabel = document.createElement("span");
+  historyLabel.className = "mp-history-label";
+  const clearHistoryBtn = document.createElement("button");
+  clearHistoryBtn.className = "mp-history-clear";
+  clearHistoryBtn.textContent = "Clear saved";
+  clearHistoryBtn.title = "Remove all previously saved reference embeddings";
+  clearHistoryBtn.addEventListener("click", () => {
+    if (!confirm("Clear all saved reference history for this person? Their current slot photos will remain.")) return;
+    personEntry.embeddingHistory = [];
+    updateHistoryLabel();
+    saveMpPersons();
+  });
+  historyRow.appendChild(historyLabel);
+  historyRow.appendChild(clearHistoryBtn);
+  card.appendChild(historyRow);
+
+  function updateHistoryLabel() {
+    const current = personEntry.embeddings.filter(Boolean).length;
+    const saved   = personEntry.embeddingHistory.length;
+    if (saved > 0) {
+      historyLabel.textContent = `🧠 ${current} current + ${saved} saved references`;
+      historyRow.classList.remove("hidden");
+    } else {
+      historyLabel.textContent = "";
+      historyRow.classList.add("hidden");
+    }
+  }
+  updateHistoryLabel();
+  personEntry._updateHistoryLabel = updateHistoryLabel;
 
   // Tip: guide user to upload varied angles for better accuracy
   const tip = document.createElement("div");
@@ -1014,7 +1062,8 @@ mpFindAllBtn.addEventListener("click", async () => {
 
   const personsPayload = persons.map(p => ({
     personName: p.name.trim(),
-    referenceEmbeddings: p.embeddings.filter(Boolean),
+    // Merge current slot embeddings + all historical embeddings for maximum coverage
+    referenceEmbeddings: [...p.embeddings.filter(Boolean), ...(p.embeddingHistory || [])],
     thumbnailDataUrl: p.thumbnailDataUrls.find(Boolean) || null,
   }));
 

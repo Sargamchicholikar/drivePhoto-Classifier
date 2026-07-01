@@ -850,6 +850,18 @@ button { cursor: pointer; font-family: inherit; border: none; outline: none; bac
 }
 .mp-slot-tip b { color: var(--brand); font-weight: 600; }
 
+.mp-history-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 2px 0; font-size: 10px;
+}
+.mp-history-row.hidden { display: none; }
+.mp-history-label { flex: 1; color: #7c3aed; font-weight: 600; }
+.mp-history-clear {
+  font-size: 10px; color: #9ca3af; background: none; border: none;
+  cursor: pointer; padding: 1px 4px; border-radius: 4px;
+}
+.mp-history-clear:hover { color: #dc2626; background: #fee2e2; }
+
 .mp-actions { display: flex; gap: 8px; }
 .btn-mp-add {
   flex: 1; padding: 8px; background: var(--white);
