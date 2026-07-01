@@ -1759,9 +1759,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const allEmbeddings = await faceDB.getAllEmbeddings();
         if (!allEmbeddings.length) { sendResponse({ ok: false, error: "NO_INDEX" }); return; }
 
-        // Photos whose source folder is the Group Photos folder are always excluded
+        // Exclude Group folder + all People subfolders (already organised photos)
         const folders = await ensureFolderTree(cachedToken);
         const groupFolderId = folders.group?.id || null;
+        const root2      = await getOrCreateFolder(cachedToken, ROOT_FOLDER_NAME);
+        const peopleRoot2 = await getOrCreateFolder(cachedToken, "People", root2.id);
+        const peopleSubs = await listSubfolders(cachedToken, peopleRoot2.id);
+        const excludeIds = new Set([groupFolderId, ...peopleSubs.map(f => f.id)].filter(Boolean));
 
         emitProgress({ operation: "findMultiPerson", stage: "match", processed: 0, total: allEmbeddings.length, message: `Searching ${allEmbeddings.length} faces for ${persons.length} people…` });
 
@@ -1771,7 +1775,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         for (let e = 0; e < allEmbeddings.length; e++) {
           const emb = allEmbeddings[e];
           if (!emb.embedding?.length) continue;
-          if (groupFolderId && emb.sourceFolderId === groupFolderId) continue;
+          if (excludeIds.has(emb.sourceFolderId)) continue;
 
           const scores = persons.map(person =>
             Math.max(...person.referenceEmbeddings.map(ref => cosineSim(emb.embedding, ref)))
