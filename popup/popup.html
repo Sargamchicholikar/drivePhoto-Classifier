@@ -186,9 +186,6 @@
                   </svg>
                   Re-sort All
                 </button>
-                <button class="btn-resort" id="scanFacesBtn" title="Build face index for instant person search">
-                  🔍 Scan Faces
-                </button>
               </div>
             </div>
 
@@ -198,37 +195,61 @@
           <div class="tab-panel hidden" id="panelPeople">
 
             <div class="org-section" id="orgSection">
-              <!-- Face index status banner -->
-              <div class="org-index-banner" id="orgIndexBanner">
-                <span class="org-index-icon" id="orgIndexIcon">⏳</span>
-                <span class="org-index-text" id="orgIndexText">Checking face index…</span>
-                <a class="org-index-scan-link hidden" id="orgIndexScanLink" href="#">Run Face Scan</a>
-                <a class="org-index-scan-link" id="orgIndexResetLink" href="#" style="color:#e53e3e;margin-left:8px">Reset Index</a>
+
+              <!-- ── STEP 1: Not set up yet ── -->
+              <div class="setup-card" id="setupCard">
+                <div class="setup-card-icon">🧠</div>
+                <div class="setup-card-title">Set up face recognition</div>
+                <div class="setup-card-desc">We'll look through your Human folder and prepare your photos for person search. This takes a few minutes and only needs to be done once.</div>
+                <button class="btn-setup-start" id="setupStartBtn">Get Started</button>
               </div>
 
-              <p class="org-desc">Add people below — upload a reference photo and set a folder name. All matches will be moved to their own folders in one pass.</p>
-
-              <!-- Multi-person list -->
-              <div class="mp-list" id="mpList"></div>
-
-              <div class="mp-actions">
-                <button class="btn-mp-add" id="mpAddBtn">+ Add Person</button>
-                <button class="btn-org-find" id="mpFindAllBtn" disabled>🔍 Find &amp; Organize All</button>
-              </div>
-
-              <!-- Progress block (people tab) -->
-              <div class="progress-block hidden" id="orgProgressWrap">
-                <div class="progress-header">
-                  <span id="orgProgressLabel" class="prog-label">Working…</span>
-                  <span id="orgProgressMeta"  class="prog-meta"></span>
+              <!-- ── STEP 2: Scanning in progress ── -->
+              <div class="setup-progress hidden" id="setupProgress">
+                <div class="setup-progress-icon">⏳</div>
+                <div class="setup-progress-label" id="setupProgressLabel">Preparing your photos…</div>
+                <div class="prog-track setup-prog-track">
+                  <div class="prog-bar" id="setupProgressBar" style="width:0%"></div>
                 </div>
-                <div class="prog-track">
-                  <div id="orgProgressBar" class="prog-bar"></div>
-                </div>
+                <div class="setup-progress-sub">You can close this panel — it'll keep running in the background.</div>
               </div>
 
-              <!-- Result list -->
-              <div class="org-results hidden" id="orgResults"></div>
+              <!-- ── STEP 3: Ready ── -->
+              <div class="setup-ready hidden" id="setupReady">
+                <div class="setup-ready-row">
+                  <span class="setup-ready-icon">✅</span>
+                  <span class="setup-ready-text" id="setupReadyText">Ready — photos prepared</span>
+                  <button class="setup-reset-btn" id="setupResetBtn" title="Clear and redo setup">Reset</button>
+                </div>
+                <div class="setup-ready-auto">New photos in your Human folder are indexed automatically every 30 minutes.</div>
+              </div>
+
+              <!-- ── Person cards (only shown when ready) ── -->
+              <div class="org-people-section hidden" id="orgPeopleSection">
+                <p class="org-desc">Add the people you want to find. Upload a photo of each person and give them a name.</p>
+
+                <div class="mp-list" id="mpList"></div>
+
+                <div class="mp-actions">
+                  <button class="btn-mp-add" id="mpAddBtn">+ Add Person</button>
+                  <button class="btn-org-find" id="mpFindAllBtn" disabled>🔍 Find &amp; Organize All</button>
+                </div>
+
+                <!-- Progress block (people tab) -->
+                <div class="progress-block hidden" id="orgProgressWrap">
+                  <div class="progress-header">
+                    <span id="orgProgressLabel" class="prog-label">Working…</span>
+                    <span id="orgProgressMeta"  class="prog-meta"></span>
+                  </div>
+                  <div class="prog-track">
+                    <div id="orgProgressBar" class="prog-bar"></div>
+                  </div>
+                </div>
+
+                <!-- Result list -->
+                <div class="org-results hidden" id="orgResults"></div>
+              </div>
+
             </div>
 
           </div><!-- /panelPeople -->

@@ -4,7 +4,6 @@ const signOutBtn   = document.getElementById("signOutBtn");
 const sortBtn      = document.getElementById("sortBtn");
 const stopBtn      = document.getElementById("stopBtn");
 const resortBtn    = document.getElementById("resortBtn");
-const scanFacesBtn = document.getElementById("scanFacesBtn");
 const sortBtnLabel = document.getElementById("sortBtnLabel");
 const copyTokenBtn = document.getElementById("copyTokenBtn");
 const mainView     = document.getElementById("mainView");
@@ -216,7 +215,6 @@ function showSignedIn() {
   signOutBtn.classList.remove("hidden");
   sortBtn.disabled      = false;
   resortBtn.disabled    = false;
-  scanFacesBtn.disabled = false;
   setStatus("Signed in. Ready to sort.", "done");
 }
 
@@ -224,9 +222,8 @@ function showSignedOut() {
   mainView.classList.add("hidden");
   authView.classList.remove("hidden");
   signOutBtn.classList.add("hidden");
-  sortBtn.disabled      = true;
-  resortBtn.disabled    = true;
-  scanFacesBtn.disabled = true;
+  sortBtn.disabled   = true;
+  resortBtn.disabled = true;
 }
 
 // ── Sign in ───────────────────────────────────────────────────────────────────
@@ -388,36 +385,18 @@ resortBtn.addEventListener("click", async () => {
   try { setSortRunning(false); } catch (_) {}
 });
 
-// ── Scan Faces ────────────────────────────────────────────────────────────────
-scanFacesBtn.addEventListener("click", async () => {
-  scanFacesBtn.disabled = true;
-  scanFacesBtn.textContent = "⏳ Scanning…";
-  showProgress();
-  setStatus("Scanning faces in Human & Group folders — this may take a while…", "active");
-
-  const res = await sendMessage("SCAN_FACES");
-  if (!res?.ok) {
-    hideProgress();
-    setStatus(`Face scan failed: ${res?.error || "Unknown error"}`, "error");
-    scanFacesBtn.disabled = false;
-    scanFacesBtn.textContent = "🔍 Scan Faces";
-  }
-  // Scan runs in background — completion handled by PROGRESS_UPDATE listener below
-});
-
+// ── Face scan progress (triggered from Organise tab setup flow) ───────────────
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type !== "PROGRESS_UPDATE" || msg?.operation !== "faces") return;
-  if (msg.stage === "done") {
-    hideProgress();
-    setStatus(`Face scan complete — ${msg.indexed ?? "?"} faces indexed.`, "done");
-    scanFacesBtn.disabled = false;
-    scanFacesBtn.textContent = "🔍 Scan Faces";
-    refreshOrgIndexBanner();
+  if (msg.stage === "scan") {
+    const pct = msg.total > 0 ? Math.round((msg.processed / msg.total) * 100) : 0;
+    setupProgressBar.style.width = pct + "%";
+    setupProgressLabel.textContent = `Preparing your photos… ${msg.processed.toLocaleString()} / ${msg.total.toLocaleString()}`;
+  } else if (msg.stage === "done") {
+    showSetupState("ready", msg.indexed ?? 0);
   } else if (msg.stage === "error") {
-    hideProgress();
-    setStatus(msg.message || "Face scan failed.", "error");
-    scanFacesBtn.disabled = false;
-    scanFacesBtn.textContent = "🔍 Scan Faces";
+    showSetupState("idle");
+    setStatus(msg.message || "Setup failed. Please try again.", "error");
   }
 });
 
@@ -593,50 +572,77 @@ reviewPromptClose.addEventListener("click", () => reviewPrompt.classList.add("hi
 // centroid before matching — this pulls the reference away from family members
 // who share similar-but-not-identical facial features.
 
-const orgResults        = document.getElementById("orgResults");
-const orgIndexBanner    = document.getElementById("orgIndexBanner");
-const orgIndexIcon      = document.getElementById("orgIndexIcon");
-const orgIndexText      = document.getElementById("orgIndexText");
-const orgIndexScanLink  = document.getElementById("orgIndexScanLink");
-const orgIndexResetLink = document.getElementById("orgIndexResetLink");
-const mpList            = document.getElementById("mpList");
-const mpAddBtn          = document.getElementById("mpAddBtn");
-const mpFindAllBtn      = document.getElementById("mpFindAllBtn");
+const orgResults         = document.getElementById("orgResults");
+const setupCard          = document.getElementById("setupCard");
+const setupProgress      = document.getElementById("setupProgress");
+const setupProgressLabel = document.getElementById("setupProgressLabel");
+const setupProgressBar   = document.getElementById("setupProgressBar");
+const setupReady         = document.getElementById("setupReady");
+const setupReadyText     = document.getElementById("setupReadyText");
+const setupResetBtn      = document.getElementById("setupResetBtn");
+const setupStartBtn      = document.getElementById("setupStartBtn");
+const orgPeopleSection   = document.getElementById("orgPeopleSection");
+const mpList             = document.getElementById("mpList");
+const mpAddBtn           = document.getElementById("mpAddBtn");
+const mpFindAllBtn       = document.getElementById("mpFindAllBtn");
 
-// Load and display face index status whenever the Organise tab is shown
-async function refreshOrgIndexBanner() {
-  const status = await sendMessage("GET_FACE_INDEX_STATUS");
-  const count  = status?.embeddingCount || 0;
-  orgIndexBanner.classList.remove("org-index-banner--ready", "org-index-banner--warning");
-  if (count > 0) {
-    orgIndexBanner.classList.add("org-index-banner--ready");
-    orgIndexIcon.textContent = "⚡";
-    orgIndexText.textContent = `Face index ready — ${count} faces indexed. Search is instant.`;
-    orgIndexScanLink.classList.add("hidden");
-  } else {
-    orgIndexBanner.classList.add("org-index-banner--warning");
-    orgIndexIcon.textContent = "⚠️";
-    orgIndexText.textContent = "No face index yet — go to Sort tab → Scan Faces first.";
-    orgIndexScanLink.classList.remove("hidden");
-    orgIndexScanLink.onclick = (e) => {
-      e.preventDefault();
-      document.getElementById("tabSort")?.click();
-    };
+function showSetupState(state, count = 0) {
+  setupCard.classList.add("hidden");
+  setupProgress.classList.add("hidden");
+  setupReady.classList.add("hidden");
+  orgPeopleSection.classList.add("hidden");
+
+  if (state === "idle") {
+    setupCard.classList.remove("hidden");
+  } else if (state === "scanning") {
+    setupProgress.classList.remove("hidden");
+  } else if (state === "ready") {
+    setupReady.classList.remove("hidden");
+    setupReadyText.textContent = `Ready — ${count.toLocaleString()} photos prepared`;
+    orgPeopleSection.classList.remove("hidden");
   }
 }
 
-orgIndexResetLink.addEventListener("click", async (e) => {
-  e.preventDefault();
-  if (!confirm("This will delete all indexed face data. You will need to run Scan Faces again. Continue?")) return;
-  await sendMessage("CLEAR_FACE_DB");
-  await refreshOrgIndexBanner();
-  setStatus("Face index cleared. Run Scan Faces to rebuild with ArcFace.", "idle");
+async function refreshOrgIndexBanner() {
+  const status = await sendMessage("GET_FACE_INDEX_STATUS");
+  const count  = status?.embeddingCount || 0;
+  if (count > 0) {
+    showSetupState("ready", count);
+  } else {
+    showSetupState("idle");
+  }
+}
+
+setupStartBtn.addEventListener("click", async () => {
+  showSetupState("scanning");
+  setupProgressLabel.textContent = "Preparing your photos…";
+  setupProgressBar.style.width = "0%";
+
+  const res = await sendMessage("SCAN_FACES");
+  if (!res?.ok) {
+    showSetupState("idle");
+    setStatus(`Setup failed: ${res?.error || "Unknown error"}`, "error");
+  }
+  // completion handled by PROGRESS_UPDATE listener
 });
+
+setupResetBtn.addEventListener("click", async () => {
+  if (!confirm("This will clear all prepared photo data. You'll need to run setup again. Continue?")) return;
+  await sendMessage("CLEAR_FACE_DB");
+  showSetupState("idle");
+});
+
 
 // ── Multi-person state ─────────────────────────────────────────────────────
 // Each entry: { name, embeddings: [], thumbnailDataUrls: [], cardEl }
 let _mpPersons = [];
-const MP_MAX_SLOTS = 3;
+const MP_MAX_SLOTS = 4;
+const MP_SLOT_LABELS = [
+  { icon: "👁", dir: "Front" },
+  { icon: "◀", dir: "Left" },
+  { icon: "▶", dir: "Right" },
+  { icon: "▼", dir: "Down" },
+];
 
 function updateMpFindAllBtn() {
   const ready = _mpPersons.some(p => p.embeddings.some(Boolean) && p.name.trim());
@@ -644,7 +650,7 @@ function updateMpFindAllBtn() {
 }
 
 // ── Person card persistence ────────────────────────────────────────────────
-const MP_STORAGE_KEY = "mpSavedPersonsV2";
+const MP_STORAGE_KEY = "mpSavedPersonsV3";
 
 function saveMpPersons() {
   const toSave = _mpPersons
@@ -665,13 +671,20 @@ function makePhotoSlot(personEntry, slotIdx) {
   el.appendChild(fileInput);
 
   function renderEmpty() {
-    // Remove everything except the hidden file input
     [...el.children].forEach(c => { if (c !== fileInput) c.remove(); });
     el.classList.remove("has-photo", "drag-over");
-    const ph = document.createElement("span");
-    ph.className = "mp-slot-ph";
-    ph.textContent = slotIdx === 0 ? "📷" : "+";
-    el.appendChild(ph);
+    const { icon, dir } = MP_SLOT_LABELS[slotIdx] || { icon: "+", dir: "" };
+    const wrap = document.createElement("div");
+    wrap.className = "mp-slot-ph";
+    const iconEl = document.createElement("span");
+    iconEl.className = "mp-slot-ph-icon";
+    iconEl.textContent = icon;
+    const labelEl = document.createElement("span");
+    labelEl.className = "mp-slot-ph-label";
+    labelEl.textContent = dir;
+    wrap.appendChild(iconEl);
+    wrap.appendChild(labelEl);
+    el.appendChild(wrap);
   }
 
   function renderFilled(thumbUrl, quality) {
@@ -837,6 +850,12 @@ function createPersonCard(savedData) {
   });
   slotsRow.appendChild(driveBtn);
   card.appendChild(slotsRow);
+
+  // Tip: guide user to upload varied angles for better accuracy
+  const tip = document.createElement("div");
+  tip.className = "mp-slot-tip";
+  tip.innerHTML = "📸 Upload <b>front</b>, <b>left</b>, <b>right</b> &amp; <b>down</b> facing photos for best accuracy";
+  card.appendChild(tip);
 
   nameInput.value = personEntry.name;
   nameInput.addEventListener("input", () => {

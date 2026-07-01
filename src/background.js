@@ -13,8 +13,10 @@ let offscreenReady = false;
 let sortShouldStop = false;
 
 // ── 6-month sort reminder ────────────────────────────────────────────────────
-const REMINDER_ALARM = "photo-sort-reminder";
-const SIX_MONTHS_MIN = 6 * 30 * 24 * 60;
+const REMINDER_ALARM    = "photo-sort-reminder";
+const AUTO_INDEX_ALARM  = "auto-index-human";
+const SIX_MONTHS_MIN    = 6 * 30 * 24 * 60;
+const AUTO_INDEX_MIN    = 30;
 
 async function scheduleNextSortReminder() {
   await chrome.storage.local.set({ lastSortTimestamp: Date.now() });
@@ -22,7 +24,125 @@ async function scheduleNextSortReminder() {
   chrome.alarms.create(REMINDER_ALARM, { delayInMinutes: SIX_MONTHS_MIN });
 }
 
+function scheduleAutoIndex() {
+  chrome.alarms.get(AUTO_INDEX_ALARM, (existing) => {
+    if (!existing) {
+      chrome.alarms.create(AUTO_INDEX_ALARM, { delayInMinutes: AUTO_INDEX_MIN, periodInMinutes: AUTO_INDEX_MIN });
+    }
+  });
+}
+
+// Run incremental face index on new Human folder photos silently in background
+async function runAutoIndex() {
+  try {
+    const silent = await getAuthToken(false);
+    if (!silent.ok) return; // not signed in — skip silently
+    cachedToken = silent.token;
+
+    await ensureFreshOffscreenRuntime();
+    const folders = await ensureFolderTree(cachedToken);
+
+    // List all photos in Human folder
+    const allPhotos = [];
+    let pt = "";
+    do {
+      const page = await listImageFilesInFolderPage(cachedToken, folders.human.id, {
+        pageToken: pt, pageSize: 100, includeVideos: false,
+      });
+      for (const f of (page.files || [])) {
+        allPhotos.push({ ...f, sourceFolderId: folders.human.id, sourceFolderName: "Human" });
+      }
+      pt = page.nextPageToken || "";
+    } while (pt);
+
+    // Only process photos not yet in faceDB
+    const newPhotos = [];
+    for (const photo of allPhotos) {
+      const done = await faceDB.getPhotoFaces(photo.id);
+      if (!done) newPhotos.push(photo);
+    }
+
+    if (newPhotos.length === 0) return; // nothing new
+
+    let indexed = 0;
+    for (const photo of newPhotos) {
+      try {
+        const refreshed = await getAuthToken(false);
+        if (refreshed.ok) cachedToken = refreshed.token;
+
+        const offRes = await chrome.runtime.sendMessage({
+          type: "OFFSCREEN_DETECT_FACES",
+          file: photo,
+          token: cachedToken,
+          releaseSessions: false,
+        });
+
+        const faces = offRes?.ok ? (offRes.faces || []) : [];
+        const faceIds = [];
+
+        for (let fi = 0; fi < faces.length; fi++) {
+          const face   = faces[fi];
+          const faceId = `face_${photo.id}_${fi}`;
+
+          const allPersons = await faceDB.getAllPersons();
+          let bestPerson = null, bestSim = -1;
+          for (const person of allPersons) {
+            const sim = cosineSim(face.embedding, person.centroid);
+            if (sim > bestSim) { bestSim = sim; bestPerson = person; }
+          }
+
+          const CLUSTER_THRESHOLD = 0.50;
+          let personId;
+          if (bestSim >= CLUSTER_THRESHOLD && bestPerson) {
+            const n = bestPerson.photoCount;
+            personId = bestPerson.id;
+            await faceDB.savePerson({
+              ...bestPerson,
+              centroid:        centroidUpdate(bestPerson.centroid, face.embedding, n),
+              photoCount:      n + 1,
+              thumbnailDataUrl: bestPerson.thumbnailDataUrl || face.thumbnailDataUrl,
+            });
+          } else {
+            personId = `person_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+            await faceDB.savePerson({
+              id: personId, name: null, centroid: face.embedding,
+              photoCount: 1, thumbnailDataUrl: face.thumbnailDataUrl, createdAt: Date.now(),
+            });
+          }
+
+          await faceDB.saveEmbedding({
+            id: faceId, photoId: photo.id, photoName: photo.name,
+            photoDate: photo.modifiedTime || null,
+            sourceFolderId: photo.sourceFolderId, sourceFolderName: photo.sourceFolderName,
+            embedding: face.embedding, box: face.box, score: face.score,
+            personId, thumbnailDataUrl: face.thumbnailDataUrl,
+          });
+          faceIds.push(faceId);
+        }
+
+        await faceDB.savePhotoFaces({ photoId: photo.id, faceIds, processedAt: Date.now() });
+        indexed++;
+      } catch (err) {
+        await faceDB.savePhotoFaces({ photoId: photo.id, faceIds: [], processedAt: Date.now(), error: err.message });
+      }
+    }
+
+    if (indexed > 0) {
+      chrome.notifications.create("auto-index-done", {
+        type:    "basic",
+        iconUrl: chrome.runtime.getURL("icons/icon48.png"),
+        title:   "Face index updated",
+        message: `${indexed} new photo${indexed > 1 ? "s" : ""} added to your face index automatically.`,
+        priority: 0,
+      });
+    }
+  } catch (err) {
+    console.warn("[AUTO_INDEX] failed:", err.message);
+  }
+}
+
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === AUTO_INDEX_ALARM) { runAutoIndex(); return; }
   if (alarm.name !== REMINDER_ALARM) return;
   chrome.notifications.create(REMINDER_ALARM, {
     type:     "basic",
@@ -303,10 +423,12 @@ chrome.action.onClicked.addListener((tab) => {
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureOffscreenDocument();
+  scheduleAutoIndex();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureOffscreenDocument();
+  scheduleAutoIndex();
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -1104,30 +1226,41 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       try {
         await ensureFreshToken();
         const folders = await ensureFolderTree(cachedToken);
-        const humanId = folders.human?.id;
-        const q = humanId
-          ? `'${humanId}' in parents and mimeType contains 'image/' and trashed=false`
-          : `mimeType contains 'image/' and trashed=false`;
 
-        let allFiles = [];
-        let pageToken = "";
-        do {
-          const url = new URL("https://www.googleapis.com/drive/v3/files");
-          url.searchParams.set("q", q);
-          url.searchParams.set("orderBy", "modifiedTime desc");
-          url.searchParams.set("pageSize", "200");
-          url.searchParams.set("fields", "nextPageToken,files(id,name,thumbnailLink,mimeType,modifiedTime)");
-          url.searchParams.set("supportsAllDrives", "true");
-          url.searchParams.set("includeItemsFromAllDrives", "true");
-          if (pageToken) url.searchParams.set("pageToken", pageToken);
+        // Collect folder IDs to search: Human + all People/ subfolders
+        const folderIds = [];
+        if (folders.human?.id) folderIds.push(folders.human.id);
+        const peopleRoot = await getOrCreateFolder(cachedToken, "People", folders.root.id);
+        const peopleSubs = await listSubfolders(cachedToken, peopleRoot.id);
+        for (const sub of peopleSubs) folderIds.push(sub.id);
 
-          const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${cachedToken}` } });
-          if (!resp.ok) throw new Error(`Drive API ${resp.status}`);
-          const data = await resp.json();
-          allFiles = allFiles.concat(data.files || []);
-          pageToken = data.nextPageToken || "";
-        } while (pageToken);
+        if (!folderIds.length) { sendResponse({ ok: true, files: [] }); return; }
 
+        // Build OR query across all folders
+        const parentQ = folderIds.map(id => `'${id}' in parents`).join(" or ");
+        const q = `(${parentQ}) and mimeType contains 'image/' and trashed=false`;
+
+        async function fetchAllPages(query) {
+          let files = [], pt = "";
+          do {
+            const url = new URL("https://www.googleapis.com/drive/v3/files");
+            url.searchParams.set("q", query);
+            url.searchParams.set("orderBy", "modifiedTime desc");
+            url.searchParams.set("pageSize", "200");
+            url.searchParams.set("fields", "nextPageToken,files(id,name,thumbnailLink,mimeType,modifiedTime)");
+            url.searchParams.set("supportsAllDrives", "true");
+            url.searchParams.set("includeItemsFromAllDrives", "true");
+            if (pt) url.searchParams.set("pageToken", pt);
+            const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${cachedToken}` } });
+            if (!resp.ok) throw new Error(`Drive API ${resp.status}`);
+            const data = await resp.json();
+            files = files.concat(data.files || []);
+            pt = data.nextPageToken || "";
+          } while (pt);
+          return files;
+        }
+
+        const allFiles = await fetchAllPages(q);
         sendResponse({ ok: true, files: allFiles });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
